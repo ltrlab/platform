@@ -59,15 +59,14 @@ jobs:
           PYTEST_ADDOPTS: -vv -p rss_probe
           RSS_PROBE_DIR: build/rss-probe
         run: |
-          trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
-          sudo fallocate -l 16G /gate-swap && sudo chmod 600 /gate-swap && sudo mkswap /gate-swap >/dev/null && sudo swapon /gate-swap
+          trap 'sleep 3; kill $(jobs -p) 2>/dev/null || true' EXIT
           ( set +e; tail -n +1 -F build/rss-probe/all.jsonl 2>/dev/null | sed -u 's/^/probe: /' ) &
           cat /proc/$$/cgroup
           unit="$(sed -n 's|^0::/system.slice/\([^/]*\).*|\1|p' /proc/$$/cgroup)"
           [ -z "$unit" ] || systemctl show "$unit" -p OOMPolicy -p KillMode -p MemoryMax || true
           nproc; free -m; swapon --show; df -h . /dev/shm
           ( set +e; sudo journalctl -f -n 0 --no-pager -o short-precise | grep --line-buffered -v -E 'sudo|pam_unix' | sed -u 's/^/journal: /' ) &
-          ( set +e; until log="$(ls -t build/dev-check/*/output.log 2>/dev/null | head -1)" && [ -n "$log" ]; do sleep 1; done; tail -n +1 -F "$log" | cut -c1-200 ) &
+          ( set +e; until log="$(ls -t build/dev-check/*/output.log 2>/dev/null | head -1)" && [ -n "$log" ]; do sleep 1; done; tail -n +1 -F "$log" ) &
           (
             set +e
             while sleep 5; do
