@@ -49,7 +49,8 @@ jobs:
       - name: Install the temporary memory probe
         shell: bash
         run: |
-          interpreter="$(ls .venv-dev/bin/python .venv-dev/Scripts/python.exe 2>/dev/null | head -1)"
+          interpreter=.venv-dev/bin/python
+          [ -x "$interpreter" ] || interpreter=.venv-dev/Scripts/python.exe
           cp .github/ci_memory_probe.py "$("$interpreter" -c 'import site; print(site.getsitepackages()[-1])')/rss_probe.py"
       - name: Run the gate, streaming tests and machine state to the console
         if: runner.os == 'Linux'
