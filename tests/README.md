@@ -16,6 +16,9 @@ The gate runs an explicit list of files (`CORE` in `scripts/dev.py`), not just p
 `python -m pytest` runs `tests/unit` and `tests/contract` (`pyproject.toml`). A passing offline gate is not hardware
 qualification: deterministic tests come first, then Linux vcan, Jetson timing and supervised hardware validation.
 
+On Linux, `tests/conftest.py` hands freed heap back to the system after every test. glibc keeps it otherwise, and the
+workers would grow to about 10 GB each and take a 16 GB CI runner down.
+
 **What the gate leaves out.** Tests that need torch or OpenCV (the environment does not install them), and
 `tests/unit/test_helm_webrtc_peer.py`, which needs `aiortc` and is run by name from an environment that has it
 (`requirements/helm-webrtc.in`). The Qt and learning checks under `tests/ml/` and `python/tests/ml/` are also explicit
