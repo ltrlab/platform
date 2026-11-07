@@ -46,13 +46,21 @@ jobs:
           echo "MUJOCO_GL=osmesa" >> "$GITHUB_ENV"
       # Temporary: the first Linux run lost its runner to a shutdown signal 5.5 minutes into pytest, and with it every
       # log. This streams what would otherwise die with the runner. Removed once the cause is known.
+      - name: Install the temporary memory probe
+        shell: bash
+        run: |
+          interpreter="$(ls .venv-dev/bin/python .venv-dev/Scripts/python.exe 2>/dev/null | head -1)"
+          cp .github/ci_memory_probe.py "$("$interpreter" -c 'import site; print(site.getsitepackages()[-1])')/rss_probe.py"
       - name: Run the gate, streaming tests and machine state to the console
         if: runner.os == 'Linux'
         shell: bash
         env:
-          PYTEST_ADDOPTS: -vv
+          PYTEST_ADDOPTS: -vv -p rss_probe
+          RSS_PROBE_DIR: build/rss-probe
         run: |
           trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
+          sudo fallocate -l 16G /gate-swap && sudo chmod 600 /gate-swap && sudo mkswap /gate-swap >/dev/null && sudo swapon /gate-swap
+          ( set +e; tail -n +1 -F build/rss-probe/all.jsonl 2>/dev/null | sed -u 's/^/probe: /' ) &
           cat /proc/$$/cgroup
           unit="$(sed -n 's|^0::/system.slice/\([^/]*\).*|\1|p' /proc/$$/cgroup)"
           [ -z "$unit" ] || systemctl show "$unit" -p OOMPolicy -p KillMode -p MemoryMax || true
@@ -68,7 +76,15 @@ jobs:
           ) &
           python scripts/dev.py check
       - if: runner.os != 'Linux'
+        env:
+          PYTEST_ADDOPTS: -p rss_probe
+          RSS_PROBE_DIR: build/rss-probe
         run: python scripts/dev.py check
+      - name: Print the temporary memory probe's record
+        if: always() && runner.os != 'Linux'
+        shell: bash
+        run: |
+          sed 's/^/probe: /' build/rss-probe/all.jsonl || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
