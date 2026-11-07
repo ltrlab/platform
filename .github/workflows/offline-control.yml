@@ -44,47 +44,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libosmesa6
           echo "MUJOCO_GL=osmesa" >> "$GITHUB_ENV"
-      # Temporary: the first Linux run lost its runner to a shutdown signal 5.5 minutes into pytest, and with it every
-      # log. This streams what would otherwise die with the runner. Removed once the cause is known.
-      - name: Install the temporary memory probe
-        shell: bash
-        run: |
-          interpreter=.venv-dev/bin/python
-          [ -x "$interpreter" ] || interpreter=.venv-dev/Scripts/python.exe
-          cp .github/ci_memory_probe.py "$("$interpreter" -c 'import site; print(site.getsitepackages()[-1])')/rss_probe.py"
-      - name: Run the gate, streaming tests and machine state to the console
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          PYTEST_ADDOPTS: -vv -p rss_probe
-          RSS_PROBE_DIR: build/rss-probe
-        run: |
-          trap 'sleep 3; kill $(jobs -p) 2>/dev/null || true' EXIT
-          ( set +e; tail -n +1 -F build/rss-probe/all.jsonl 2>/dev/null | sed -u 's/^/probe: /' ) &
-          cat /proc/$$/cgroup
-          unit="$(sed -n 's|^0::/system.slice/\([^/]*\).*|\1|p' /proc/$$/cgroup)"
-          [ -z "$unit" ] || systemctl show "$unit" -p OOMPolicy -p KillMode -p MemoryMax || true
-          nproc; free -m; swapon --show; df -h . /dev/shm
-          ( set +e; sudo journalctl -f -n 0 --no-pager -o short-precise | grep --line-buffered -v -E 'sudo|pam_unix' | sed -u 's/^/journal: /' ) &
-          ( set +e; until log="$(ls -t build/dev-check/*/output.log 2>/dev/null | head -1)" && [ -n "$log" ]; do sleep 1; done; tail -n +1 -F "$log" ) &
-          (
-            set +e
-            while sleep 5; do
-              echo "machine: $(date -u +%T) $(free -m | awk '/Mem:/{print "used="$3" avail="$7}/Swap:/{print "swap="$3}' | tr '\n' ' ')shm=$(du -sm /dev/shm | cut -f1)M tmp_free=$(df -m --output=avail . | tail -1 | tr -d ' ')M procs=$(ps -e --no-headers | wc -l)"
-              ps -eo rss=,etimes=,pid=,args= --sort=-rss | head -3 | cut -c1-150 | sed 's/^/machine:   /'
-            done
-          ) &
-          python scripts/dev.py check
-      - if: runner.os != 'Linux'
-        env:
-          PYTEST_ADDOPTS: -p rss_probe
-          RSS_PROBE_DIR: build/rss-probe
-        run: python scripts/dev.py check
-      - name: Print the temporary memory probe's record
-        if: always() && runner.os != 'Linux'
-        shell: bash
-        run: |
-          sed 's/^/probe: /' build/rss-probe/all.jsonl || true
+      - run: python scripts/dev.py check
       - uses: actions/upload-artifact@v4
         if: always()
         with:
