@@ -13,12 +13,13 @@ a GPU machine, export the policy, evaluate it, and load it in Helm's policy mode
 | Train ACT on an export | Ran as a 200-step smoke run on one episode. It proves the path, not a policy. |
 | Export a policy and load it on the Jetson | Ran for a 14-axis ACT smoke policy (loaded and answered a `(100, 14)` chunk; see [POLICY_MODE.md](../operator/POLICY_MODE.md)). |
 | A trained policy driving the arms | Not shown on the robot. |
-| A policy trained on format 9 driving the robot | **Not possible.** A 16-axis policy names 16 joints and policy mode drives 14 arm axes; `data/lerobot_policy.py` refuses a policy whose joints differ from the receiver's. Driving the head from a policy is future work. |
+| A policy trained on format 9's arms driving the robot | **Not shown.** Export with `--joints left,right` (the 14 arm axes, each found by name); policy mode takes the policy's joints by name. Neither has run on real format 9 data. |
+| A policy trained on all 16 axes driving the robot | **Not possible.** Policy mode drives the 14 arm axes and `data/lerobot_policy.py` refuses a policy with other joints. Driving the head from a policy is future work. |
 
-What a person does today: record and review format 9 episodes (once the first live check passes), export them, and
-train on the 16-axis dataset to test the pipeline. A policy the robot can drive must be 14 axes. The exporter does not
-cut a format 9 episode down to the arms, so the only 14-axis data is format 8 data from the release that recorded it;
-a drivable policy from format 9 data needs new work (an arms-only export, or head support in policy mode).
+What a person does today: record and review format 9 episodes (once the first live check passes) and export them. For
+a policy the robot can drive, export the arms alone with `--joints left,right`: the 14 axes policy mode drives, with
+their effort and velocity. A 16-axis export tests the pipeline, but policy mode refuses a 16-axis policy: driving the
+head from a policy is future work.
 
 ## 1. Record and review
 
@@ -76,12 +77,16 @@ What it does to each episode:
   it. A grid time more than `MAX_GAP_PERIODS` = 2.5 periods after its frame (two dropped frames in a row) refuses the
   episode.
 - Writes `observation.state` = `qpos`, `action` = `actions` (the next commanded position), `observation.images.<role>`
-  for each camera, and the task string. Format 8 gives 14 axes, format 9 gives 16.
+  for each camera, and the task string. That is every recorded axis (14 for format 8, 16 for format 9), or with
+  `--joints` the joints and groups of the robot definition it names: `left,right` is both arms and their grippers.
+  Each is found in the episode by its name and written in the definition's order.
 - Format 9 adds `observation.effort`, `observation.velocity` and `observation.head_camera_pose`, but only when **every
   exported row of every episode has them** (`complete_extras`). One row without a valid reading leaves that feature out
-  of the whole dataset. Simulated episodes have no head readings, so they export without any of the three.
+  of the whole dataset. Only the exported joints count: the head's missing readings do not drop the arms' effort or
+  velocity from an arms-only export. The exporter refuses simulated episodes today ([generated data](#generated-data)).
 - Never mixes episodes that differ in axes, cameras, image size or extras: the later episode is refused and listed. Export
-  such episodes as separate datasets.
+  such episodes as separate datasets. With `--joints` the exported joints are compared, so episodes recorded in another
+  order, or with more axes, share one dataset.
 - Writes `meta/minerva_provenance.json`: each exported episode's source file, hash, review, kept span and who drove it.
 
 The dataset is LeRobot format v2.1, the version openpi pins.
@@ -151,7 +156,8 @@ Only ACT exports so far. The output holds `policy.pt`, `minerva_policy.json` (jo
 sample for checking another machine. The export fails if the traced chunk differs from LeRobot's by more than 1 mrad.
 Copy the folder to `~/minerva/policies/<name>` on the Jetson; Helm's Teleop **Policy** box lists what is there.
 
-Loading refuses a receiver whose joints differ from the policy's. Policy mode and its confirmation, take-over and
+Loading matches the policy's joints to the receiver's by name, in whatever order each lists them, and refuses any
+other set. Policy mode and its confirmation, take-over and
 recording are in [POLICY_MODE.md](../operator/POLICY_MODE.md). Run a new policy on the Jetson's virtual receiver before
 any live attempt.
 
@@ -181,7 +187,8 @@ python scripts/sim/generate_parallel.py --out DIR --episodes 120 --workers 4 -- 
 
 `generate_parallel.py` runs several workers on one machine. On the training server, `gen_parallel.py` is its Linux
 port, started with `launch_gen.sh` and watched with `gen_status.sh`. Generated episodes are format 9 with the
-simulated head fixed at the neck's zero and no head effort, velocity or pose sample (NaN, masked). The exporter then
-leaves out `observation.effort`, `observation.velocity` and `observation.head_camera_pose`, so they cannot be mixed in
-one dataset with real format 9 episodes that have the extras. They train the pipeline; they are
-not robot data and are never marked `sim2real_validated`.
+simulated head fixed at the neck's zero and no head effort, velocity or pose sample (NaN, masked). **The LeRobot
+exporter refuses them.** Every row says authority `policy`, which the exporter reads as a Helm policy session, and the
+simulated scene's task state names no lifecycle state, so each is refused as "a policy episode whose rows do not all say
+their lifecycle state" (reproduced 2026-11-08, with and without `--joints`). `train_minerva.py` reads them directly.
+They train the pipeline; they are not robot data and are never marked `sim2real_validated`.

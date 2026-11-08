@@ -51,9 +51,13 @@ These pass the offline gate and are not in the running release.
 ### Open
 
 - **Format 9's first live check.** Learning from real data depends on it.
-- **A policy trained on format 9 cannot drive the robot.** Policy mode runs the 14 arm axes and refuses a policy whose
-  joints differ, and the exporter cannot cut a format 9 episode down to the arms. It fails closed. Closing this takes an
-  arms-only export or head support in policy mode ([training](data/TRAINING.md)).
+- **A policy trained on all of format 9's axes cannot drive the robot.** Policy mode runs the 14 arm axes and refuses a
+  policy with other joints. It fails closed. The exporter cuts a format 9 episode to the arms by name
+  (`--joints left,right`) and policy mode takes such a policy's joints by name, but neither has run on real format 9
+  data. Driving the head from a policy is future work ([training](data/TRAINING.md)).
+- **Generated episodes cannot be exported to LeRobot.** The generator marks every row authority `policy` and the
+  simulated task state has no lifecycle state, so the exporter refuses each one (reproduced 2026-11-08). Only
+  `train_minerva.py`, which reads the HDF5 files directly, trains on them ([generated data](data/TRAINING.md#generated-data)).
 - **No collision checking in the production teleop profile, and no hardware emergency stop that covers every actuator.**
   [Safety](operator/SAFETY.md) says exactly what stops what.
 - **The install guides have not been followed on a fresh Jetson.** They were written from the code. The repository's

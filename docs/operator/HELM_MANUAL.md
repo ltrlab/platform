@@ -318,7 +318,7 @@ recorded and faster than 1x is refused. See [live replay](LIVE_REPLAY.md).
 ## Policy mode
 
 **Mode: Policy** runs a trained policy that drives the arms in a session with the leaders connected. Choose it in the policy card
-and press Start. See [policy mode](POLICY_MODE.md); it drives 14 axes and refuses a policy whose joints differ.
+and press Start. See [policy mode](POLICY_MODE.md); it drives 14 axes, takes a policy's joints by name and refuses any other set.
 
 ## Tune
 

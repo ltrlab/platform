@@ -1,5 +1,6 @@
 """An exported LeRobot policy on the robot: its description is checked, it warms up before it reports ready, it takes
-the cameras in its own order at the recorded size, and it refuses a receiver with other joints. The TorchScript call
+the cameras in its own order at the recorded size, and it takes the receiver's joints by name and refuses any
+other set. The TorchScript call
 itself needs torch (checked on the Jetson and coolserver, docs/operator/POLICY_MODE.md); a stand-in runs here."""
 
 import json
@@ -70,8 +71,9 @@ def test_it_warms_up_before_it_is_ready_and_answers_in_its_camera_order(tmp_path
 
 def test_it_refuses_other_joints_cameras_and_image_sizes(tmp_path):
     policy, _ = exported(tmp_path)
-    with pytest.raises(ValueError, match='trained on the joints'):
-        policy.reset(SimpleNamespace(joint_names=tuple(JOINTS[7:] + JOINTS[:7])))
+    for names in (JOINTS[:-1], JOINTS + ['head_pan'], JOINTS[:-1] + JOINTS[:1]):  # One fewer, one more, one twice.
+        with pytest.raises(ValueError, match='trained on the joints'):
+            policy.reset(SimpleNamespace(joint_names=tuple(names)))
     good = {role: np.zeros((240, 320, 3), np.uint8) for role in policy.camera_roles}
     with pytest.raises(ValueError, match='needs the head camera'):
         policy({'q': np.zeros(14), 'images': {k: v for k, v in good.items() if k != 'head'}})
@@ -85,6 +87,7 @@ def test_a_malformed_export_or_answer_is_refused(tmp_path):
     for change, message in (
         ({'kind': 'other'}, 'Not an exported'),
         ({'joints': []}, 'names the joints'),
+        ({'joints': JOINTS[:-1] + JOINTS[:1]}, 'each joint'),
         ({'camera_roles': ['head', 'head']}, 'once each'),
         ({'image_shape_chw': [1, 240, 320]}, 'RGB'),
         ({'fps': 0}, 'chunk rate'),
@@ -101,3 +104,15 @@ def test_load_policy_takes_an_exported_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(lerobot_policy, 'torchscript_runner', Runner)
     policy = load_policy(f'lerobot:{tmp_path}')
     assert isinstance(policy, ExportedPolicy) and policy.describe()['camera_roles'] == META['camera_roles']
+
+
+def test_a_receiver_listing_the_joints_in_another_order_gets_each_command_by_name(tmp_path):
+    policy, (runner,) = exported(tmp_path)
+    receiver = tuple(JOINTS[:6] + JOINTS[7:13] + [JOINTS[6], JOINTS[13]])  # The grippers after both arms.
+    policy.reset(SimpleNamespace(joint_names=receiver))
+    position = {name: index / 10 for index, name in enumerate(JOINTS)}
+    images = {role: np.zeros((240, 320, 3), np.uint8) for role in policy.camera_roles}
+    chunk = policy({'q': np.array([position[name] for name in receiver]), 'images': images})
+    state, _ = runner.calls[-1]
+    assert np.allclose(state, [position[name] for name in JOINTS])  # The policy sees its own order.
+    assert np.allclose(chunk[0], [position[name] + 0.1 for name in receiver])  # Each joint gets its own command.

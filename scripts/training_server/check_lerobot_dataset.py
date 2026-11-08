@@ -1,6 +1,8 @@
 """Load an exported Minerva LeRobot dataset with LeRobot itself and compare it with the source episode.
 usage: check_lerobot_dataset.py <dataset root> <source episode .hdf5>   (the dataset's first episode's source)
-Format 9's extras (effort, velocity, head camera pose) are compared too when the dataset has them."""
+Format 9's extras (effort, velocity, head camera pose) are compared too when the dataset has them. Each exported
+joint is compared with its own column of the source, found by name: an export with --joints holds fewer, in the robot
+definition's order."""
 
 import json
 import sys
@@ -17,6 +19,7 @@ EXTRAS = {
     'observation.velocity': 'observations/qvel',
     'observation.head_camera_pose': 'observations/head_camera_pose',
 }  # data.lerobot_export.EXTRAS
+PER_JOINT = ('observation.effort', 'observation.velocity')  # One value per joint, as the state.
 ds = LeRobotDataset(repo_id=f'minerva/{root.name}', root=root)  # Local: the name is only a label.
 info = json.loads((root / 'meta/info.json').read_text())
 extras = [name for name in EXTRAS if name in info['features']]
@@ -31,7 +34,14 @@ print(
     },
 )
 provenance = json.loads((root / 'meta/minerva_provenance.json').read_text())['episodes'][0]
+joints = info['features']['observation.state']['names']
+print('joints', len(joints), joints)
 with h5py.File(source, 'r') as f:
+    value = f.attrs['minerva_joints']
+    recorded = [name for name in (value.decode() if isinstance(value, bytes) else str(value)).split(',') if name]
+    missing = [name for name in joints if name not in recorded]
+    assert not missing, f'the source records no {missing}'
+    columns = [recorded.index(name) for name in joints]
     telem = f['timestamps/telem'][:]
     first = provenance['source_span'][0]
     worst = {role: 99.0 for role in ROLES}
@@ -39,10 +49,12 @@ with h5py.File(source, 'r') as f:
         item = ds[index]
         row = int(np.searchsorted(telem, telem[first] + index / ds.fps, side='right') - 1)
         assert abs(float(item['timestamp']) - index / ds.fps) < 1e-4, (index, float(item['timestamp']))
-        assert np.allclose(item['observation.state'].numpy(), f['observations/qpos'][row], atol=1e-6), index
-        assert np.allclose(item['action'].numpy(), f['actions'][row], atol=1e-6), index
+        assert np.allclose(item['observation.state'].numpy(), f['observations/qpos'][row][columns], atol=1e-6), index
+        assert np.allclose(item['action'].numpy(), f['actions'][row][columns], atol=1e-6), index
         for name in extras:
-            assert np.allclose(item[name].numpy(), f[EXTRAS[name]][row], atol=1e-6), (name, index)
+            expected = f[EXTRAS[name]][row]
+            expected = expected[columns] if name in PER_JOINT else expected
+            assert np.allclose(item[name].numpy(), expected, atol=1e-6), (name, index)
         for role in ROLES:
             decoded = item[f'observation.images.{role}'].permute(1, 2, 0).numpy().astype(np.float64) * 255
             original = f[f'observations/images/{role}'][row].astype(np.float64)

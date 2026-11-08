@@ -52,14 +52,17 @@ environment.
   frame at or before it, so nothing comes from the future. A grid time more than `MAX_GAP_PERIODS` = 2.5 periods
   after its frame (two dropped frames in a row) refuses the episode; one dropped frame passes.
 - **Features.** `observation.state` = `qpos` and `action` = `actions` (the next commanded position), both over all of the
-  episode's axes: 14 for format 8, 16 for format 9. Each camera is `observation.images.<role>`, stored as video.
+  episode's axes (14 for format 8, 16 for format 9), or over the joints `--joints` names. It takes names or groups of
+  the robot definition, finds each in the episode by name and writes them in the definition's order: `--joints
+  left,right` is the arms and grippers policy mode drives. Each camera is `observation.images.<role>`, stored as video.
   Format 9 adds `observation.effort`, `observation.velocity` and `observation.head_camera_pose` when every exported row
-  has them (`complete_extras`).
-- **Never mixed.** Episodes with different joints, cameras, image sizes or extras go into separate datasets. Format 8
-  and format 9 data are therefore never combined by the exporter; whether old data is worth training alongside new is
-  an open question.
-- **Provenance.** `meta/minerva_provenance.json` records each exported episode's source file, hash, review and kept
-  span, who drove it (`human`, `policy` or `correction`), and the seconds trimmed before a take-over.
+  has them for the exported joints (`complete_extras`).
+- **Never mixed.** Episodes with different joints, cameras, image sizes or extras go into separate datasets; with
+  `--joints`, the exported joints are compared. Format 8 and format 9 data are never combined, even for the same
+  joints: format 9 carries effort and velocity that format 8 lacks. Whether old data is worth training alongside new
+  is an open question.
+- **Provenance.** `meta/minerva_provenance.json` records the exported joints, and each exported episode's source file,
+  hash, review, recorded joints and kept span, who drove it (`human`, `policy` or `correction`), and the seconds trimmed before a take-over.
 
 ## What was measured
 

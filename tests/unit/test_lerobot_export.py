@@ -16,24 +16,38 @@ from robot_platform.helm.episode_worker import Episodes
 ROOT = Path(__file__).resolve().parents[2]
 NAMES = tuple(f'{side}_arm_j{k}' for side in ('left', 'right') for k in range(1, 7)) + ('left_gripper', 'right_gripper')
 ROSTER = NAMES + ('head_pan', 'head_tilt')  # Format 9 records the whole robot.
+ARMS = export.resolve_joints('left,right')  # Both arms and their grippers, in the robot definition's order.
 POSE = [0.05, -0.1, 0.6, 0.0, 0.0, 0.0, 1.0]
 ROLES = ('left_wrist', 'right_wrist', 'head')
 SESSION = 'live-20261022T120000Z'
 
 
-def record(root, times, *, authority=None, lifecycle=None, finish=True, session=SESSION, missing_torque=()):
-    """An episode whose row i has qpos[i] = i + j/100 and images at level i (mod 250) on every camera; effort
-    i - j/100, velocity j/10 and the head's sample 10 ms before the receiver's, except the rows in missing_torque.
+def record(
+    root,
+    times,
+    *,
+    authority=None,
+    lifecycle=None,
+    finish=True,
+    session=SESSION,
+    missing_torque=(),
+    roster=ROSTER,
+    head_torque=True,
+):
+    """An episode whose row i has qpos[i] = i + j/100 (j: the column in `roster`) and images at level i (mod 250)
+    on every camera; effort i - j/100, velocity j/10 and the head's sample 10 ms before the receiver's, except the
+    rows in missing_torque, and the head's effort in no row without head_torque (a simulated head reads none).
     `lifecycle` gives each row's lifecycle state in its task state, as a policy session's capture does."""
+    head = {roster.index('head_pan'), roster.index('head_tilt')}
     writer = TaskEpisodeWriter(
         root / session / 'episodes',
-        ROSTER,
+        roster,
         {'data_source': 'real', 'camera_roles': list(ROLES)},
         hz=15.0,
         max_pending=256,
     )
     for i, t in enumerate(times):
-        torques = [np.nan if i in missing_torque else i - j / 100 for j in range(16)]
+        torques = [np.nan if i in missing_torque or (j in head and not head_torque) else i - j / 100 for j in range(16)]
         writer.append(
             q=[i + j / 100 for j in range(16)],
             qcmd=[i + j / 100 + 0.5 for j in range(16)],
@@ -289,3 +303,91 @@ def test_an_extra_is_exported_only_where_every_row_has_it_and_never_mixed(tmp_pa
     assert len(refused) == 1 and 'extra features' in refused[0][1]
     alone = export.plan_episode(refused[0][0], 15)
     assert alone['exported_extras'] == ('observation.velocity', 'observation.head_camera_pose')
+
+
+def test_the_joints_to_export_are_names_or_groups_of_the_robot_definition_in_its_order():
+    assert ARMS == (
+        tuple(f'left_arm_j{k}' for k in range(1, 7))
+        + ('left_gripper',)
+        + tuple(f'right_arm_j{k}' for k in range(1, 7))
+        + ('right_gripper',)
+    )
+    assert export.resolve_joints(['right_gripper', 'left', 'left_gripper']) == ARMS[:7] + ('right_gripper',)
+    assert export.resolve_joints('head') == ('head_pan', 'head_tilt')
+    for spec, message in (('arms', "'arms' is neither a joint nor a group"), (' , ', 'names no joint')):
+        with pytest.raises(export.ExportError, match=message):
+            export.resolve_joints(spec)
+
+
+class Capture:
+    """Stands in for LeRobot's dataset: keeps what the exporter creates and adds."""
+
+    def __init__(self):
+        self.options, self.frames, self.saved = None, [], 0
+
+    def create(self, **options):
+        self.options = options
+        return self
+
+    def add_frame(self, frame):
+        self.frames.append(frame)
+
+    def save_episode(self):
+        self.saved += 1
+
+
+def test_a_format_9_episode_exports_the_arms_alone_each_column_found_by_name(tmp_path):
+    """The 16 recorded axes cut to the 14 policy mode drives. The recording lists the grippers after both arms and the
+    robot definition after each arm, so each column is found by its name; effort and velocity come with them. The
+    head's missing effort, which drops effort for the whole robot, no longer drops the arms'."""
+    kept, _ = record(tmp_path, steady(12), head_torque=False)
+    Episodes(tmp_path).review(kept, 'keep')
+    (whole,), _ = export.plan(tmp_path, 15)
+    assert whole['exported_extras'] == ('observation.velocity', 'observation.head_camera_pose')
+    plans, refused = export.plan(tmp_path, 15, joints=ARMS)
+    assert not refused and plans[0]['joints'] == list(ARMS) and plans[0]['recorded_joints'] == list(ROSTER)
+    assert plans[0]['exported_extras'] == ('observation.effort', 'observation.velocity', 'observation.head_camera_pose')
+    dataset, out = Capture(), tmp_path / 'dataset'
+    export.write(plans, out, 'minerva/arms', 15, export.TASK, create=dataset.create)
+    vector = {'dtype': 'float32', 'shape': (14,), 'names': list(ARMS)}
+    features = dataset.options['features']
+    assert features['observation.state'] == features['action'] == features['observation.effort'] == vector
+    assert features['observation.velocity'] == vector and features['observation.head_camera_pose']['shape'] == (7,)
+    columns = [ROSTER.index(name) for name in ARMS]
+    frame = dataset.frames[3]
+    assert np.allclose(frame['observation.state'], [3 + j / 100 for j in columns])
+    assert np.allclose(frame['action'], [4 + j / 100 + 0.5 for j in columns])
+    assert np.allclose(frame['observation.effort'], [3 - j / 100 for j in columns])
+    assert np.allclose(frame['observation.velocity'], [j / 10 for j in columns])
+    assert np.allclose(frame['observation.head_camera_pose'], POSE)
+    sidecar = json.loads((out / 'meta' / 'minerva_provenance.json').read_text(encoding='utf-8'))
+    assert sidecar['joints'] == list(ARMS) and sidecar['episodes'][0]['recorded_joints'] == list(ROSTER)
+
+
+def test_episodes_recorded_in_other_orders_share_one_dataset_and_one_without_a_joint_is_refused(tmp_path):
+    live_order = ARMS + ('head_pan', 'head_tilt')  # As Helm records: the receiver's joints, then the head.
+    fixture, _ = record(tmp_path, steady(12))
+    live, live_path = record(tmp_path, steady(12, start=200.0), roster=live_order)
+    episodes = Episodes(tmp_path)
+    episodes.review(fixture, 'keep')
+    episodes.review(live, 'keep')
+    whole, refused = export.plan(tmp_path, 15)
+    assert len(whole) == 1 and len(refused) == 1 and 'different joints' in refused[0][1]  # Two recorded orders.
+    plans, refused = export.plan(tmp_path, 15, joints=ARMS)
+    assert len(plans) == 2 and not refused
+    for planned, roster in zip(plans, (ROSTER, live_order)):
+        assert np.allclose(planned['qpos'][3], [3 + roster.index(name) / 100 for name in ARMS])
+    with h5py.File(live_path, 'r+') as f:
+        f.attrs['minerva_joints'] = ','.join('lift' if name == 'right_gripper' else name for name in live_order)
+    plans, refused = export.plan(tmp_path, 15, joints=ARMS)
+    assert len(plans) == 1 and 'recorded no right_gripper' in refused[0][1]
+
+
+def test_the_command_line_takes_the_joints_to_export(tmp_path):
+    kept, _ = record(tmp_path, steady(30))
+    Episodes(tmp_path).review(kept, 'keep')
+    command = [sys.executable, '-m', 'robot_platform.data.lerobot_export', '--evidence', str(tmp_path), '--dry-run']
+    result = subprocess.run(command + ['--joints', 'left,right'], capture_output=True, text=True, timeout=120, cwd=ROOT)
+    assert result.returncode == 0 and f'export {kept}: rows 0-28 -> 29 frames' in result.stdout, result.stderr
+    result = subprocess.run(command + ['--joints', 'arms'], capture_output=True, text=True, timeout=120, cwd=ROOT)
+    assert result.returncode == 2 and 'neither a joint nor a group' in result.stderr
