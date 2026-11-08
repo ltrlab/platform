@@ -7,6 +7,10 @@ behaviour and robot operation are not touched by any of it.
 **Triggers.** `.github/workflows/offline-control.yml` runs on pull requests, on pushes to `main`, and on manual dispatch,
 on `ubuntu-latest` and `windows-latest`.
 
+**`main` is protected.** A commit reaches `main` only once both jobs, `control (ubuntu-latest)` and
+`control (windows-latest)`, have passed on it and the branch is up to date with `main`; nobody can delete `main` or
+force-push to it, administrators included. Changes go through a pull request.
+
 **Why the ARM64 build is a prerequisite.** A clean checkout has no ARM64 `guarded_controller`, so
 `test_a_built_release_is_small_complete_and_verifiable` would skip while pytest still returns success. The developer
 gate rejects any skip, so the cross-build is a required step, not an option.
