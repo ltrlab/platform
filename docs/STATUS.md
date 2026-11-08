@@ -6,7 +6,8 @@ records behind this page are in [`history/`](history/) and [`devices/`](devices/
 ## Minerva
 
 The robot runs release `20261105T040341Z-fc68d9d`. The repository is ahead of it: what is below "Merged, not on the
-robot" has never run on the arms.
+robot" has never run on the arms. [What v1 must do](robots/minerva/V1_ACCEPTANCE.md) lists what delivery needs against
+this page.
 
 ### Proven on the robot
 
@@ -26,7 +27,7 @@ robot" has never run on the arms.
 | --- | --- |
 | Pausing the arms when a camera drops | In the running release, written after a real loose-cable stall. No pause is recorded on the robot. |
 | VR arm teleop | A live session on 2026-11-03 ended in a joint-speed trip. No completed session is recorded. |
-| Headset 3D view | The head steers over the ordinary link. The 3D picture is not recorded as seen in the headset. |
+| Headset 3D view | The head steers over the ordinary link. The operator reports the 3D picture working in the headset when last tried (2026-11-08); no record shows it. |
 | Remote headset over WebRTC | Video has never been seen working on a Quest. |
 | Guided camera calibration | Stills taken live on 2026-11-02. No solve is recorded on the robot. |
 | Table fiducials | Labels are stuck on the table, and the head camera fitted five of them at 0.75 px RMS. |

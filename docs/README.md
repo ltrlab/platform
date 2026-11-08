@@ -49,7 +49,7 @@ Calibration procedures, in the order [Calibration](operator/CALIBRATION.md) give
 ## Robots
 
 - [The robots](robots/README.md): what a robot is in this repository, and how to add one
-- **Minerva**: [hardware](robots/minerva/HARDWARE.md), [neck](robots/minerva/NECK_FEETECH.md),
+- **Minerva**: [what v1 must do](robots/minerva/V1_ACCEPTANCE.md), [hardware](robots/minerva/HARDWARE.md), [neck](robots/minerva/NECK_FEETECH.md),
   [head and neck model](robots/minerva/HEAD_NECK_MODEL.md), [CAD](robots/minerva/MINERVA_CAD.md),
   [physics measurements](robots/minerva/MINERVA_PHYSICS_MEASUREMENTS.md), [UPS](robots/minerva/UPS_MONITOR.md),
   [gripper force feedback](robots/minerva/GRIPPER_FORCE_FEEDBACK.md)
