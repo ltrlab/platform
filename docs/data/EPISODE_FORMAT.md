@@ -23,14 +23,15 @@ recorded the two arms and grippers alone (14 axes) and is still read by the expo
 
 ## The 16 axes
 
-Every per-axis array uses this order, stored in the `minerva_joints` attribute (`robot_platform.data.roster.AXES`):
+Every per-axis array holds these 16 axes in the order its `minerva_joints` attribute lists them. Helm records the
+receiver's order (each arm followed by its gripper), then the head; the tests write `robot_platform.data.roster.AXES`
+(both arms, both grippers, the head). Find a column by its name, never by its position.
 
-| Columns | Axes | Receiver | Units |
-| --- | --- | --- | --- |
-| 0–5 | `left_arm_j1` … `left_arm_j6` | RobStride, CAN | receiver motor radians |
-| 6–11 | `right_arm_j1` … `right_arm_j6` | RobStride, CAN | receiver motor radians |
-| 12–13 | `left_gripper`, `right_gripper` | RobStride, CAN | receiver motor radians |
-| 14–15 | `head_pan`, `head_tilt` | Feetech STS3250, own process | raw servo radians (steps × 2π / 4096) |
+| Axes | Receiver | Units |
+| --- | --- | --- |
+| `left_arm_j1` … `left_arm_j6`, `left_gripper` | RobStride, CAN | receiver motor radians |
+| `right_arm_j1` … `right_arm_j6`, `right_gripper` | RobStride, CAN | receiver motor radians |
+| `head_pan`, `head_tilt` | Feetech STS3250, own process | raw servo radians (steps × 2π / 4096) |
 
 These are motor coordinates, not CAD joint angles. The episode's `metadata_json` carries the joint map, with each
 motor's sign, scale and offset onto its URDF joint. `head_pan` drives `neck_z` and `head_tilt` drives `neck_y`.
@@ -111,11 +112,12 @@ mount. The arms are not moved by this; recording the head adds no work to the ar
 - Apply `action_valid` over a whole action chunk: a chunk must not cross an authority change or the episode's end.
 - Use a reading only where its mask is true. NaN is never replaced by zero.
 - LeRobot export (`python -m robot_platform.data.lerobot_export`) writes `observation.state` = `qpos` and `action` =
-  `actions` over all 16 axes. It adds `observation.effort`, `observation.velocity` and `observation.head_camera_pose`
+  `actions` over all 16 axes, or with `--joints left,right` over the arms alone, each column found by its name. It adds `observation.effort`, `observation.velocity` and `observation.head_camera_pose`
   only when every exported row has them. Episodes that differ in axes, cameras, image size or those extras are never
   mixed in one dataset.
-- A policy trained on 16 axes cannot yet run on the robot: Helm's policy mode drives the 14 arm axes and refuses a policy
-  whose joints differ (`data/lerobot_policy.py`). Driving the head from a policy is future work.
+- A policy trained on all 16 axes cannot yet run on the robot: Helm's policy mode drives the 14 arm axes and refuses a
+  policy with other joints (`data/lerobot_policy.py`). One trained on an arms-only export can. Driving the head from a
+  policy is future work.
 - Training from these files is in [TRAINING.md](TRAINING.md).
 
 ## First live check of format 9
@@ -139,7 +141,8 @@ Format 9 has passed offline tests only. Before relying on it, record once on the
    never published as complete, and the exporter skips it.
 7. Export the good episode and check it on the training server ([TRAINING.md](TRAINING.md)):
    ```bash
-   python -m robot_platform.data.lerobot_export --evidence <copy of ~/minerva/evidence> --out datasets/check        --include-unreviewed
+   python -m robot_platform.data.lerobot_export --evidence <copy of ~/minerva/evidence> --out datasets/check \
+       --include-unreviewed
    python scripts/training_server/check_lerobot_dataset.py datasets/check <source episode.hdf5>
    ```
    The checker's first line lists the extras; `observation.effort`, `observation.velocity` and

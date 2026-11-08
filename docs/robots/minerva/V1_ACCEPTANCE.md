@@ -28,7 +28,7 @@ this page follows it. **Now** is one of **Met**, **Partly** (some of it has run 
 | Every session records [format 9](../../data/EPISODE_FORMAT.md): effort, velocity and the head camera's pose | Its [first live check](../../data/EPISODE_FORMAT.md#first-live-check-of-format-9), passed | **Not yet**: recordings so far are format 8 (14 axes, no torque) |
 | The lift and the base are in the recording | A format with them, checked live | **Not yet** |
 | A recording exports to LeRobot with its effort channel | An exported dataset from a real session | **Partly**: [the export](../../data/DATASET_PIPELINE.md) exists; one format 8 demonstration was exported and trained on as a pipeline test (2026-10-22) |
-| A policy trains on exported data with the axes chosen by name | Gate tests, then a dataset from a real session | **Not yet**: policy mode refuses any joint set but the 14 arm axes, and the exporter cannot cut a format 9 episode down to them |
+| A policy trains on exported data with the axes chosen by name | Gate tests, then a dataset from a real session | **Partly**: the exporter's `--joints left,right` picks the 14 arm axes by name and policy mode matches a policy's joints by name, in gate tests ([training](../../data/TRAINING.md)); no dataset from a real session |
 | A policy trained on real data drives the arms in a supervised trial | A trial record | **Not yet**: an exported 14-axis policy loads and answers on the Jetson; none has driven the arms |
 
 ## Safety

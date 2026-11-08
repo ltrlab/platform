@@ -4,8 +4,8 @@ LeRobot dataset format v2.1, the version openpi pins (lerobot 0cf864870cf29f4738
 that LeRobot is installed, beside the episodes copied off the robot (docs/data/DATASET_PIPELINE.md):
 
     python -m robot_platform.data.lerobot_export --evidence ~/minerva-episodes --out datasets/minerva-handoff \\
-        --repo-id minerva/handoff [--fps 15] [--task TEXT] [--include-unreviewed] [--pre-takeover-s 1]
-        [--min-stretch-s 0.5] [--dry-run]
+        --repo-id minerva/handoff [--joints left,right] [--fps 15] [--task TEXT] [--include-unreviewed]
+        [--pre-takeover-s 1] [--min-stretch-s 0.5] [--dry-run]
 
 Each episode, as recorded:
   - Only complete episodes reviewed Keep in Replay (the session's reviews.jsonl), unless --include-unreviewed.
@@ -20,11 +20,14 @@ Each episode, as recorded:
   - Resampled onto a fixed grid of `fps` by the robot-clock timestamps (`timestamps/telem`): each grid time takes the
     latest recorded frame at or before it, so nothing comes from the future. A grid time more than 2.5 periods after
     its frame (two dropped frames in a row) is a gap in the recording and refuses the episode.
-  - observation.state = qpos and action = actions (the next commanded position), both in receiver motor radians in
-    the episode's own joint order; observation.images.<role> per camera, as stored (HxWx3 uint8).
-  - Format 9 (16 axes: both arms, both grippers and the neck) adds, when every exported row has it:
-    observation.effort (the motors' measured effort, N m), observation.velocity (rad/s) and
+  - observation.state = qpos and action = actions (the next commanded position), both in receiver motor radians:
+    every recorded joint in the episode's own order, or with --joints the joints it names, picked by name and in the
+    robot definition's order. observation.images.<role> per camera, as stored (HxWx3 uint8).
+  - Format 9 (16 axes: both arms, both grippers and the neck) adds, when every exported row has it for the exported
+    joints: observation.effort (the motors' measured effort, N m), observation.velocity (rad/s) and
     observation.head_camera_pose (the head camera's [x, y, z, qx, qy, qz, qw] in the robot frame). docs/data/EPISODE_FORMAT.md
+--joints takes names or groups of the robot definition (robots/definitions/minerva.json): `left,right` is both arms and
+their grippers, the 14 axes policy mode drives, from a format 8 or a format 9 episode alike.
 Episodes with different joints, cameras, image sizes or extra features are never mixed in one dataset: format 8
 recorded the arms alone (14 axes), format 9 the whole robot (16).
 A sidecar meta/minerva_provenance.json records each exported episode's source, hash, review, span and who drove it.
@@ -69,9 +72,35 @@ def _text(value):
     return value.item() if hasattr(value, 'item') else value
 
 
-def read_episode(path):
-    """An episode's arrays and identity, images left in the file: {'joints', 'roles', 'image_shape', 'telem',
-    'qpos', 'actions', 'action_valid', 'authority', 'lifecycle', 'complete', 'collected_at', 'language_instruction'}.
+def resolve_joints(spec, robot='minerva'):
+    """The joints `spec` names (a comma-separated string, or a list, of joint and group names of the robot's
+    definition), once each, in the definition's order."""
+    from robot_platform.robots import load_robot
+
+    definition = load_robot(robot)
+    items = [item.strip() for item in (spec.split(',') if isinstance(spec, str) else spec) if item.strip()]
+    if not items:
+        raise ExportError('--joints names no joint')
+    chosen = set()
+    for item in items:
+        if item in definition.groups:
+            chosen.update(definition.groups[item])
+        elif item in definition.joint_names:
+            chosen.add(item)
+        else:
+            raise ExportError(
+                f'{item!r} is neither a joint nor a group of {definition.name}: '
+                f'groups {", ".join(definition.groups)}; joints {", ".join(definition.joint_names)}'
+            )
+    return tuple(name for name in definition.joint_names if name in chosen)
+
+
+def read_episode(path, joints=None):
+    """An episode's arrays and identity, images left in the file: {'joints', 'recorded_joints', 'roles',
+    'image_shape', 'telem', 'qpos', 'actions', 'action_valid', 'authority', 'lifecycle', 'complete', 'collected_at',
+    'language_instruction'}.
+    `joints`: the joints to export, picked from the recording by name (resolve_joints); None for every recorded joint
+    in its recorded order. A recording without one of them is refused.
     `lifecycle`: a policy session's lifecycle state for each row, from its task state; None for any other episode."""
     import h5py
     import numpy as np
@@ -81,7 +110,12 @@ def read_episode(path):
         version = int(_text(attrs.get('format_version', 0)) or 0)
         if version not in FORMATS:
             raise ExportError(f'{path.name}: format {version}, not a task capture format {FORMATS}')
-        joints = [name for name in str(_text(attrs.get('minerva_joints', ''))).split(',') if name]
+        recorded = [name for name in str(_text(attrs.get('minerva_joints', ''))).split(',') if name]
+        joints = recorded if joints is None else list(joints)
+        missing = [name for name in joints if name not in recorded]
+        if missing:
+            raise ExportError(f'{path.name}: recorded no {", ".join(missing)} (it has {", ".join(recorded)})')
+        columns = [recorded.index(name) for name in joints]
         roles = json.loads(_text(attrs.get('camera_roles', '[]')))
         shapes = {role: tuple(f[f'observations/images/{role}'].shape[1:]) for role in roles}
         if len(set(shapes.values())) != 1:
@@ -91,19 +125,23 @@ def read_episode(path):
         if authority and set(authority) <= set(CORRECTED):
             lifecycle = [json.loads(_text(value)).get('lifecycle') for value in f['task_state'][:]]
         extras = {}
-        for name, dataset, mask, _width, _names in EXTRAS:
+        for name, dataset, mask, width, _names in EXTRAS:
             if dataset in f and mask in f:
                 values, valid = np.asarray(f[dataset][:], dtype=np.float32), np.asarray(f[mask][:], dtype=bool)
+                if width is None:  # One value per joint: the exported joints' columns, and only their validity.
+                    values = values[:, columns]
+                    valid = valid[:, columns] if valid.ndim > 1 else valid
                 extras[name] = (values, valid.all(axis=-1) if valid.ndim > 1 else valid)
         return dict(
             joints=joints,
+            recorded_joints=recorded,
             roles=roles,
             image_shape=next(iter(shapes.values())),
             version=version,
             extras=extras,
             telem=np.asarray(f['timestamps/telem'][:], dtype=np.float64),
-            qpos=np.asarray(f['observations/qpos'][:], dtype=np.float32),
-            actions=np.asarray(f['actions'][:], dtype=np.float32),
+            qpos=np.asarray(f['observations/qpos'][:], dtype=np.float32)[:, columns],
+            actions=np.asarray(f['actions'][:], dtype=np.float32)[:, columns],
             action_valid=np.asarray(f['action_valid'][:], dtype=bool),
             authority=authority,
             lifecycle=lifecycle,
@@ -216,10 +254,10 @@ def complete_extras(episode, rows):
     )
 
 
-def plan_episode(path, fps, *, pre_takeover_s=PRE_TAKEOVER_S, min_stretch_s=MIN_STRETCH_S):
+def plan_episode(path, fps, *, joints=None, pre_takeover_s=PRE_TAKEOVER_S, min_stretch_s=MIN_STRETCH_S):
     """What one episode exports as: its identity and its stretches, each a span and its grid rows (a teleop
-    episode's one human span, a policy session's corrected_stretches), or an ExportError."""
-    episode = read_episode(path)
+    episode's one human span, a policy session's corrected_stretches), or an ExportError. `joints` as read_episode."""
+    episode = read_episode(path, joints)
     if not episode['complete']:
         raise ExportError(f'{path.name}: the recording did not finish')
     if episode['lifecycle'] is not None:
@@ -286,12 +324,22 @@ def select(evidence, *, include_unreviewed=False):
     return sorted(chosen, key=lambda item: item[0].stat().st_mtime)
 
 
-def plan(evidence, fps, *, include_unreviewed=False, pre_takeover_s=PRE_TAKEOVER_S, min_stretch_s=MIN_STRETCH_S):
-    """(plans, refused): each selected episode planned, or refused with its reason. Mixed rosters are refused."""
+def plan(
+    evidence,
+    fps,
+    *,
+    joints=None,
+    include_unreviewed=False,
+    pre_takeover_s=PRE_TAKEOVER_S,
+    min_stretch_s=MIN_STRETCH_S,
+):
+    """(plans, refused): each selected episode planned, or refused with its reason. Mixed rosters are refused; with
+    `joints` (read_episode) the roster is the exported joints, so episodes recorded in other orders or with more
+    joints can share one dataset."""
     plans, refused = [], []
     for path, review in select(evidence, include_unreviewed=include_unreviewed):
         try:
-            planned = plan_episode(path, fps, pre_takeover_s=pre_takeover_s, min_stretch_s=min_stretch_s)
+            planned = plan_episode(path, fps, joints=joints, pre_takeover_s=pre_takeover_s, min_stretch_s=min_stretch_s)
         except ExportError as exc:
             refused.append((path, str(exc)))
             continue
@@ -352,6 +400,7 @@ def write(plans, out, repo_id, fps, task, *, create=None):
                     episode_index=len(provenance),
                     source=f'{planned["path"].parent.parent.name}/{planned["path"].stem}',
                     sha256=digest,
+                    recorded_joints=planned['recorded_joints'],
                     collected_at=planned['collected_at'],
                     review=planned['review'],
                     source_span=[int(stretch['first']), int(stretch['last'])],
@@ -396,6 +445,11 @@ def main(argv=None):
     parser.add_argument('--repo-id', default='minerva/handoff')
     parser.add_argument('--fps', type=int, default=15)
     parser.add_argument('--task', default=TASK)
+    parser.add_argument(
+        '--joints',
+        help='joints or groups of the robot definition to export, comma-separated (left,right: both arms and their '
+        'grippers); default every recorded joint',
+    )
     parser.add_argument('--include-unreviewed', action='store_true', help='also export episodes not yet reviewed')
     parser.add_argument(
         '--pre-takeover-s',
@@ -415,9 +469,14 @@ def main(argv=None):
         parser.error('--fps is 1 to 60')
     if not (0 <= args.pre_takeover_s <= 10 and 0 <= args.min_stretch_s <= 60):
         parser.error('--pre-takeover-s is 0 to 10 s and --min-stretch-s 0 to 60 s')
+    try:
+        joints = None if args.joints is None else resolve_joints(args.joints)
+    except ExportError as exc:
+        parser.error(str(exc))
     plans, refused = plan(
         args.evidence,
         args.fps,
+        joints=joints,
         include_unreviewed=args.include_unreviewed,
         pre_takeover_s=args.pre_takeover_s,
         min_stretch_s=args.min_stretch_s,

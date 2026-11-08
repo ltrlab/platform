@@ -35,6 +35,8 @@ def validate_meta(meta):
     fps = meta.get('fps')
     if not isinstance(joints, list) or not joints or not all(isinstance(j, str) and j for j in joints):
         raise ValueError('An exported policy names the joints it was trained on')
+    if len(set(joints)) != len(joints):
+        raise ValueError('An exported policy names each joint it was trained on once')
     if not isinstance(roles, list) or not all(isinstance(r, str) and r for r in roles) or len(set(roles)) != len(roles):
         raise ValueError('An exported policy names its cameras once each')
     if (
@@ -84,6 +86,8 @@ class ExportedPolicy:
         self.image_shape = tuple(self.meta['image_shape_chw'][1:]) + (3,)
         self.name = f'lerobot:{self.meta.get("policy_type", "policy")}:{self.path.name}'
         self._run = runner(self.path / 'policy.pt', device)
+        # reset matches the receiver's joints to these by name: positions into the policy's order, the chunk back out.
+        self._to_policy = self._to_receiver = None
         # TorchScript optimizes on its first calls (seconds on the Jetson): do them now, not in the first rollout.
         blank = np.zeros(self.image_shape, dtype=np.uint8)
         for _ in range(warmup):
@@ -100,11 +104,16 @@ class ExportedPolicy:
         return chunk
 
     def reset(self, context):
-        if tuple(context.joint_names) != self.joints:
+        """Take the receiver's joints: the policy's own, matched by name in whatever order the receiver lists them.
+        Any other set (a joint more, one fewer, or one named twice) is refused."""
+        names = tuple(context.joint_names)
+        if len(set(names)) != len(names) or set(names) != set(self.joints):
             raise ValueError(
                 f'The policy was trained on the joints {list(self.joints)}, '
                 f"not this receiver's {list(context.joint_names)}"
             )
+        self._to_policy = [names.index(joint) for joint in self.joints]
+        self._to_receiver = [self.joints.index(name) for name in names]
 
     def __call__(self, observation):
         import numpy as np
@@ -125,7 +134,10 @@ class ExportedPolicy:
         q = np.asarray(observation['q'], dtype=np.float64)
         if q.shape != (len(self.joints),) or not np.all(np.isfinite(q)):
             raise ValueError("The policy needs every joint's measured position")
-        return self._check(self._run(q, frames))
+        if self._to_policy is not None:  # The receiver's order (reset) into the policy's.
+            q = q[self._to_policy]
+        chunk = self._check(self._run(q, frames))
+        return chunk if self._to_receiver is None else chunk[:, self._to_receiver]
 
     def describe(self):
         return {

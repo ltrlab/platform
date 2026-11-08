@@ -75,8 +75,8 @@ policy mode (`teleop/episode_source.py`, `teleop/policy_source.py`) feed the sam
 | 8 | Minerva, 14 axes, no torque | Helm task capture | What the running release recorded. Still read by export, Replay and the episode source. |
 | 9 | Minerva, 16 axes with effort, velocity and head pose | Helm task capture (`data/roster.FORMAT_VERSION`) | **Current in the code. Never run on the robot.** Recording refuses without a live head. |
 
-Policy mode drives 14 axes and refuses a policy whose joints differ (`data/lerobot_policy.py`), so a 16-axis policy
-cannot drive the robot yet.
+Policy mode drives 14 axes, takes a policy's joints by name and refuses any other set (`data/lerobot_policy.py`), so a
+16-axis policy cannot drive the robot yet. The exporter's `--joints left,right` cuts format 9 to those 14.
 
 ## The source tree
 

@@ -7,8 +7,9 @@ control they have in teleop. It shares its source interface with [Replay on the 
 **Status.** Built and tested offline (a scripted policy against the real Rust receiver, guarded and direct profiles) and
 rehearsed in `helm --sim` with `hold_still`. An ACT policy exported for the Jetson loads and runs there (about 37 ms a chunk at
 the median on the Jetson's GPU). No document records a policy driving the arms, or a policy-correction session, on the robot.
-**It drives 14 axes**: `data/lerobot_policy.py` refuses a policy whose joints differ from the receiver's, so a policy trained on
-[format 9](../data/EPISODE_FORMAT.md)'s 16 axes cannot drive the robot yet.
+**It drives 14 axes**: `data/lerobot_policy.py` matches a policy's joints to the receiver's by name and refuses any other set.
+A policy trained on [format 9](../data/EPISODE_FORMAT.md)'s 16 axes cannot drive the robot yet; one trained on an arms-only
+export (`--joints left,right`, [training](../data/TRAINING.md)) can.
 
 ## Using it
 
