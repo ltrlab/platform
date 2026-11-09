@@ -378,6 +378,9 @@ class FakeTeleop:
     def set_zero(self):
         self.calls.append('zero')
 
+    def restart_head(self):
+        self.calls.append('restart_head')
+
     def snapshot(self):
         return {'phase': 'running' if self.active else 'stopped'}
 
@@ -419,13 +422,23 @@ def test_web_endpoints_drive_teleop_and_take_the_motors_from_the_reader(tmp_path
         )
         assert routed.status == 200
         assert (await client.post('/api/helm/teleop/zero', json={}, headers=headers)).status == 200
+        assert (await client.post('/api/helm/teleop/head/restart', json={})).status == 403  # Signed in, in control.
+        assert (await client.post('/api/helm/teleop/head/restart', json={}, headers=headers)).status == 200
         assert (await client.post('/api/helm/teleop/key', json={'key': 'T', 'x': 1}, headers=headers)).status == 422
         await client.post('/api/helm/teleop/stop', json={}, headers=headers)
         await client.post('/api/helm/connect', json={}, headers=headers)
         assert link.running
         # Teleop takes the motors from the reader rather than asking for Disconnect first.
         state = await (await client.post('/api/helm/teleop/start', json={}, headers=headers)).json()
-        assert not link.running and teleop.calls == ['start', 'T', ('flip', 'left_arm_j1'), 'zero', 'stop', 'start']
+        assert not link.running and teleop.calls == [
+            'start',
+            'T',
+            ('flip', 'left_arm_j1'),
+            'zero',
+            'restart_head',
+            'stop',
+            'start',
+        ]
 
     async def run():
         async with TestClient(TestServer(create_app(session, link, teleop=teleop, token='secret'))) as client:

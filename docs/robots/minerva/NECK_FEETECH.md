@@ -162,6 +162,17 @@ arms' speed caps, alignment and braking near the ends apply. It cycles every 40 
   reader thread do the pipe's work). The child moves itself, and so its service, to the background CPUs before it
   builds the head, and cycles it there on its own 40 ms grid (`HeadLoop`). A fault there, or the child dying,
   holds the arms as an inline head's fault does. A virtual head answers at once and cycles on the arms' ticks.
+- **A fresh offer for each command:** a command's lifetime (100 ms, `command_ms`) counts from the receiver's offer it
+  carries. Each head cycle takes a fresh offer just before its command (`DirectLifecycleSession(fresh_offers=True)`):
+  two exchanges a cycle, each a tick of the service. With the offer in the reply before, a period had already gone
+  from the lifetime when the command was sent, and a cycle could start only about 20 ms late, less the service's tick
+  jitter: on 2026-11-08 a hold about 8 ms late faulted ("command_expired · wrong_owner") with the service's ticks up
+  to 13.46 ms late. Against a model of the service's ticks (`tests/contract/test_head_margin.py`), a hold now keeps
+  its command 44 ms late and following 34 ms (its target's 100 ms age bounds the command from when it was sampled,
+  before the offer); the lifetime itself is unchanged.
+- **Its timings:** each cycle records how late it started against its slot, how long its offer and its command
+  waited for the service, its exchanges, the receiver's time, and the head thread's CPU time and preemptions (Linux).
+  A fault record (`fault-<UTC>.json`) keeps the last 250 (10 s).
 - **Why a process, not a thread:** on a thread the head shared the arms' interpreter.
   - First, the head's thread ran on the control CPUs beside the arms' loop and receiver. The arms' worst cycles got
     slower: exchanges up to 10.6 ms (2-3 ms alone), and a command came within 2 ms of expiring.
@@ -183,7 +194,11 @@ arms' speed caps, alignment and braking near the ends apply. It cycles every 40 
 
   Without a headset, the head holds at its zero.
 - **Faults hold both:**
-  - a head fault makes the arms disengage, with a notice;
+  - a head fault makes the arms disengage, with a notice. With the arms holding, **Restart head** on the Head card
+    (`POST /api/helm/teleop/head/restart`, in control) re-arms a head its receiver stopped and still holds, where it
+    holds it, as the arms are re-armed after a trip: the head holds (HOLD) and Engage (T) follows with it. A receiver
+    that faulted or cut the head's torque refuses, and the head stays faulted, saying why. It is never offered while
+    the arms follow, return or have faulted themselves;
   - an arms fault sends a powered head back as Return (X) does, to its reference, then down to where it rested,
     and disables it there; the session closes only once it has. H disables it at once.
 - **Start-up:** a head that fails to start shows as a head fault, and the arms run on.

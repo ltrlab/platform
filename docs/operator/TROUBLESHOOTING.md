@@ -84,7 +84,8 @@ not the last.
 | `... dropped off USB. The arms hold: Engage (T) follows again once it is back.` | Reseat the camera cable. See [Cameras](#cameras). |
 | `waiting to re-arm it (feedback_stale)` / `If it stays held, support the arm, then press H to disable it (it goes limp).` | The receiver holds the arm but cannot re-arm yet. Support the arm and press H if it persists. |
 | `... stopped answering and is set aside. ` | A gripper went quiet; the arm is lowered without it. |
-| `<fault> · The arms hold: Engage (T) follows again without the head; stop the session to start the head again.` | The head faulted (a servo alarm, lost feedback, its process). The arms hold. |
+| `<fault> · The arms hold: Engage (T) follows again without the head. Restart head (the Head card) re-arms it where its receiver holds it, while the arms hold.` | The head faulted (a late cycle, a servo alarm, lost feedback, its process). The arms hold. With the arms holding, **Restart head** re-arms a head its receiver stopped and still holds (`command_expired`, `lease_expired`), and Engage (T) follows with it. Its fault record (`fault-<UTC>.json` in the head's `live-head-*` evidence) keeps the last 250 cycles' timings. |
+| `The head did not restart: <why>. The arms hold: ...` | Its receiver faulted or cut the head's torque, or is still braking it (try again). Support the head and stop the session to start it again. |
 | `Leader input lost; holding measured pose until Engage` | The leader samples stopped for 80 ms. Check the bridge, the leaders' USB and the link, then **T**. |
 | `Disable could not be confirmed: ... Use the foot switch; the session remains faulted.` | The software Disable did not confirm. Use the foot switch. |
 | `Lowering stopped: ... Stop the session and start it again.` | The lowering failed. Support the arm, **H**. |

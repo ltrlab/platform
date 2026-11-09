@@ -5,12 +5,20 @@ const SOURCES = { headset: 'following the headset', holding: 'holding: the heads
 
 export const signedDegrees = (radians) => `${radians >= 0 ? '+' : ''}${((radians * 180) / Math.PI).toFixed(0)}°`;
 
-// {shown, readout, fault, headset, zero}: zero is whether the Zero button can act (a headset tracking).
+// {shown, readout, fault, headset, zero, restart}: zero is whether the Zero button can act (a headset tracking);
+// restart whether Restart head can (a faulted head while the arms hold: helm/teleop.py's restart_head).
 export function headView(teleop, xr, host) {
   const head = teleop?.head;
   const headset = xr || {};
-  const view = { shown: Boolean(head) || Boolean(headset.connected), fault: false, zero: Boolean(headset.tracking) };
-  if (head?.fault) {
+  const view = {
+    shown: Boolean(head) || Boolean(headset.connected),
+    fault: false,
+    zero: Boolean(headset.tracking),
+    restart: Boolean(head?.restartable),
+  };
+  if (head?.restarting) {
+    view.readout = 'Restarting the head where its receiver holds it…';
+  } else if (head?.fault) {
     view.readout = head.fault;
     view.fault = true;
   } else if (head) {

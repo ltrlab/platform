@@ -47,6 +47,9 @@ These pass the offline gate and are not in the running release.
 - The lift over USB serial (`firmware/lift_actuator`), tested only in its simulator. `lift` stays inactive in the
   robot's definition and has no receiver.
 - The simulation line: scripted demonstrator, generated episodes, randomized layouts, table fiducials.
+- The head's commands each taking a fresh offer (about 30 ms more lateness before `command_expired`), a fault record
+  keeping its last cycles' timings, and **Restart head**, which re-arms a head its receiver stopped while the arms hold
+  ([neck](robots/minerva/NECK_FEETECH.md)). Written after the head faulted holding on 2026-11-08.
 
 ### Open
 

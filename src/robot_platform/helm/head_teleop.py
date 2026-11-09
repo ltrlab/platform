@@ -25,17 +25,36 @@ from robot_platform.neck import clearance
 
 PERIOD_S = 0.04  # The head's commands at 25 Hz (its profile's loop_hz); its receiver ramps each over 40 ms.
 # The head cycles on the arms' ticks, on a grid of PERIOD_S slots: a tick this early still takes its slot (the ticks
-# meet the grid only to float precision), and a late one does not push the next slot. Each command takes the offer of
-# the reply before it, so two consecutive gaps must stay under the direct policy's command lifetime (100 ms).
+# meet the grid only to float precision), and a late one does not push the next slot. Each command takes a fresh offer
+# just before it goes out, so a gap between two commands must stay under the direct policy's command lifetime (100 ms,
+# less a tick of its service's).
 DUE_SLACK_S = PERIOD_S / 4
 CYCLE_BUDGET_S = 0.035
 POSE_FRESH_S = 0.2  # A headset pose this recent steers the head;
 RETURN_AFTER_S = 1.0  # without one the head holds its last target this long, then returns to its zero pose.
 # With a shoulder clearance, the head's targets step at this share of its speeds: steps the lifecycle takes whole.
 SPEED_SHARE = 0.9
+# The last cycles' timings a fault record keeps (10 s at 25 Hz): how late each started, how long its offer and its
+# command waited for the service, and how much of it the head's thread ran or was preempted.
+TIMINGS = 250
+# Why a restart did not re-arm the head follows its fault after this (HeadTeleop.restart): the receiver re-arms only a
+# head it stopped and still holds (a late command, an expired lease).
+RESTART_FAILED = ' · Restart failed: '
 # The head follows at most this share of its profile's speed, catching up included: its receiver trips at 1.25
 # times that speed (control.approach OVERSPEED_HEADROOM), and coming down at 1.0 rad/s its tilt read 1.30 (2026-11-02).
 FOLLOW_SHARE = 0.7
+
+
+def _thread_usage():
+    """The calling thread's (CPU seconds, involuntary context switches); switches None where the system does not
+    count them per thread (Windows)."""
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_THREAD)
+        return usage.ru_utime + usage.ru_stime, usage.ru_nivcsw
+    except (ImportError, AttributeError, OSError):
+        return time.thread_time(), None
 
 
 class HeadTeleop:
@@ -61,6 +80,8 @@ class HeadTeleop:
         self.rest = None  # Where the head rested when the session began ({motor: raw rad}): Return ends there.
         self.returning = None  # Return's stage: 'centre' (to the reference), then 'rest'; None otherwise.
         self._disable_next = False
+        self.timings = deque(maxlen=TIMINGS)  # Each cycle's (_timing), for the fault record.
+        self.restarts = 0  # Restarts that re-armed the head.
 
     # -- resources -------------------------------------------------------------------------
 
@@ -156,8 +177,8 @@ class HeadTeleop:
         controller = GuardedControllerClient(
             exchange, group=config['group'], identity=config['identity'], joint_names=names
         )
-        # Each cycle reads the reply of the cycle before (DirectLifecycleSession), so its feedback and target ages
-        # are bounded by the head's period, not the arms' 10 ms one.
+        # Each cycle reads its own fresh offer's reply (DirectLifecycleSession), so its feedback and target ages are
+        # bounded by the head's period, not the arms' 10 ms one.
         # Its commands keep under FOLLOW_SHARE of the head's speed; its receiver keeps its own cap.
         rows = [dict(row, max_velocity=FOLLOW_SHARE * row['max_velocity']) for row in derived['lifecycle']]
         lifecycle = TeleopLifecycle(
@@ -170,7 +191,9 @@ class HeadTeleop:
         )
         # A cycle following nothing (Idle, Enable, Hold) takes the receiver, renews it or takes a fresh offer at
         # the head service's 10 ms ticks before its command: it has that command's lifetime, which the receiver
-        # bounds it by, as the arms' holds have their verdict's. Following cycles keep the cycle budget.
+        # bounds it by, as the arms' holds have their verdict's. Following cycles keep the cycle budget. Every
+        # cycle takes a fresh offer (`fresh_offers`): with the reply's, a cycle 10 ms late expired the command
+        # before it (2026-11-08).
         self.session = DirectLifecycleSession(
             controller,
             config,
@@ -179,6 +202,7 @@ class HeadTeleop:
             period_s=PERIOD_S,
             cycle_budget_s=CYCLE_BUDGET_S,
             hold_budget_s=config['direct']['command_ms'] / 1000,
+            fresh_offers=True,
             clock=self.clock,
         )
         self.names = names
@@ -354,15 +378,19 @@ class HeadTeleop:
         # On the grid, the next slot follows this one; a key between slots, or a cycle half a period late (a
         # stall), starts the grid again from now.
         on_grid = action is None and self._due is not None and started - self._due < PERIOD_S / 2
-        self._due = (self._due if on_grid else started) + PERIOD_S
+        due, self._due = self._due, (self._due if on_grid else started) + PERIOD_S
+        usage, before, timed = _thread_usage(), self.session.last_cycle, False
         try:
             target = self._target(started)
             # Only Engage and following use it; any other cycle follows nothing (the session's hold budget).
             following = action == 'engage' or (action is None and self.state in ('ENGAGING', 'TELEOP'))
             record = self.session.cycle(action=action, target=target if following else None, started_at=started)
+            timed = self._timing(due, started, usage, before)
             self._advance_return()
             return record
         except Exception as exc:
+            if not timed:
+                self._timing(due, started, usage, before)
             status = getattr(exc, 'status', None) or self.session.controller.status or {}
             reason = status.get('reason')
             self.fault = (
@@ -372,6 +400,33 @@ class HeadTeleop:
             )
             self._keep_fault(exc, status)
             raise
+
+    def _timing(self, due, started, usage, before):
+        """This cycle's timing, from its session's record (none if it failed before it reached the session, whose
+        record is then still `before`): when it started against its slot, how long its offer (with the lifecycle's
+        step) and its command waited, and the head thread's CPU time and preemptions. True once kept."""
+        cycle = self.session.last_cycle
+        cycle = {} if cycle is None or cycle is before else cycle
+        mapped, completed = cycle.get('mapped_at'), cycle.get('completed_at')
+        after = _thread_usage()
+        ms = lambda seconds: None if seconds is None else round(seconds * 1000, 3)  # noqa: E731
+        self.timings.append(
+            {
+                'started': started,
+                'late_ms': None if due is None else ms(started - due),
+                'action': cycle.get('action'),
+                'state': cycle.get('lifecycle_after'),
+                'offer_ms': None if mapped is None else ms(mapped - started),
+                'rpc_ms': None if cycle.get('rpc_ms') is None else round(cycle['rpc_ms'], 3),
+                'took_ms': None if completed is None else ms(completed - started),
+                'exchanges': cycle.get('rpc_count'),
+                'receiver_ms': cycle.get('receiver_accepted_ms'),
+                'cpu_ms': None if usage is None or after is None else ms(after[0] - usage[0]),
+                'preempted': None if usage is None or after is None or usage[1] is None else after[1] - usage[1],
+                'failure': cycle.get('failure'),
+            }
+        )
+        return True
 
     def _keep_fault(self, exc, status):
         """The failing cycle, beside the live head receiver's evidence (fault-<UTC>.json): what was asked of the
@@ -391,12 +446,51 @@ class HeadTeleop:
                 'stepped': self._stepped,
                 'rest_target': self.rest_target,
                 'limited': self.limited,
+                # Where the milliseconds went before it: nothing said, at the faults of 2026-10-31 and 2026-11-08.
+                'recent_cycles': list(self.timings),
             }
             (Path(directory) / f'fault-{stamp}.json').write_text(
                 json.dumps(record, indent=1, default=repr) + '\n', encoding='utf-8'
             )
         except (OSError, TypeError, ValueError):
             pass  # Evidence only: never stands in the way of the fault itself.
+
+    @property
+    def restartable(self):
+        """Whether the head was built, so a restart can ask its receiver (one that did not start cannot)."""
+        return self.session is not None and self.receiver is not None
+
+    def restart(self):
+        """After a fault, re-arm the head where its receiver holds it and hold it there (HOLD), as the arms are
+        re-armed after a trip (helm.teleop's pause): the arms' Engage (T) follows with it again. Only a receiver that
+        stopped the head and still holds it re-arms (a command or lease that expired: a late cycle); one that faulted
+        or cut the head's torque refuses, and the head stays faulted, saying why. Never beside the head's cycles:
+        its loop ended with the fault. Raises ValueError when it did not re-arm."""
+        if self.fault is None:
+            raise ValueError('The head has no fault to restart from')
+        if self.session is None or self.receiver is None:
+            raise ValueError('The head did not start: stop the session to start it again')
+        fault = self.fault.split(RESTART_FAILED)[0]
+        started = self.clock()
+        try:
+            recovered = self.session.recover()  # False while the receiver still brakes the head: nothing changed.
+            if recovered:
+                record = self.session.cycle(action='disengage', started_at=started)  # Its shutdown, ended at once.
+                if self.state != 'HOLD':
+                    raise RuntimeError(f'it is {self.state} once re-armed, not holding')
+        except Exception as exc:
+            self.fault = f'{fault}{RESTART_FAILED}{exc}'
+            status = getattr(exc, 'status', None) or self.session.controller.status or {}
+            self._keep_fault(exc, status)
+            raise ValueError(str(exc) or type(exc).__name__) from exc
+        if not recovered:
+            raise ValueError('Its receiver is still stopping the head: restart it again in a moment')
+        # As a session's start leaves it: on no grid yet, nothing stepped, nothing returning.
+        self.fault, self._due, self._held = None, None, None
+        self._stepped, self._aligned, self.limited = None, False, False
+        self.returning, self._disable_next = None, False
+        self.restarts += 1
+        return record
 
     def _advance_return(self):
         """Return's next stage once the head has reached this one's goal (its steps there, and its reading)."""
@@ -437,6 +531,7 @@ class HeadTeleop:
         return {
             'state': self.state,
             'fault': self.fault,
+            'restarts': self.restarts,
             'source': getattr(self, 'source', None),
             'headset': pose,
             'positions': positions,
@@ -549,7 +644,9 @@ def serve_head(bundle, live, conn, open_receiver=None, open_harness=None, verifi
     the arms' CPUs, builds the head, and cycles it on its own grid (HeadLoop), steered over `conn` by the arms' loop:
     ('action', action, number), ('pose', yaw, pitch) and ('close',). It answers ('built', scheduling) or ('fault',
     reason) once, then ('status', head status, loop word) every cycle, and ('closed', error) as it ends. A lost
-    channel (the arms' process gone) closes the head as ('close',) would. `verified`: the release's mesh digests the
+    channel (the arms' process gone) closes the head as ('close',) would. ('restart', number) re-arms a faulted head
+    (HeadTeleop.restart) and cycles it again; the status word's `restart` is (the last number taken, its refusal or
+    None). `verified`: the release's mesh digests the
     arms' process registered (models.urdf.verified_assets): on the robot, with no CAD files, the head model loads by
     them, as there (a head process without them failed to build in its rehearsal on Minerva, 2026-10-31)."""
     import os
@@ -571,7 +668,7 @@ def serve_head(bundle, live, conn, open_receiver=None, open_harness=None, verifi
         return
     loop = HeadLoop(head, placement=lambda: scheduling).start()
     conn.send(('built', scheduling))
-    received, sent_at, error = 0, None, None
+    received, sent_at, error, restart = 0, None, None, (0, None)
     try:
         while True:
             if conn.poll(STATUS_S):
@@ -581,6 +678,9 @@ def serve_head(bundle, live, conn, open_receiver=None, open_harness=None, verifi
                 if message[0] == 'action':
                     loop.post(message[1])
                     received = message[2]
+                elif message[0] == 'restart':
+                    loop, refused = _restart(head, loop, lambda: scheduling)
+                    restart = (message[1], refused)
                 elif message[0] == 'pose':
                     try:
                         head.pose(message[1], message[2])
@@ -598,6 +698,7 @@ def serve_head(bundle, live, conn, open_receiver=None, open_harness=None, verifi
                             'returning': head.returning,
                             'pending': loop.pending,
                             'received': received,
+                            'restart': restart,
                         },
                     )
                 )
@@ -617,6 +718,22 @@ def serve_head(bundle, live, conn, open_receiver=None, open_harness=None, verifi
             conn.send(('closed', error))
         except (OSError, ValueError):
             pass
+
+
+def _restart(head, loop, placement):
+    """A restart in the head's process: its loop ended with the fault, and a new one cycles the head once it is
+    re-armed. Returns (the loop, the refusal or None)."""
+    if head.fault is None:
+        return loop, 'The head has no fault to restart from'
+    try:
+        loop.stop()
+    except RuntimeError as exc:
+        return loop, str(exc)  # A cycle still stuck in its exchange: nothing restarts beside it.
+    try:
+        head.restart()
+    except ValueError as exc:
+        return loop, str(exc)
+    return HeadLoop(head, placement=placement).start(), None
 
 
 class HeadProcess:
@@ -640,7 +757,7 @@ class HeadProcess:
         self._wake = threading.Condition(self._lock)
         self._actions = deque()
         self._pose = None
-        self._numbered = 0
+        self._numbered = self._restarts = 0
         self._closing, self._closed = False, None
         self._process = self._conn = None
         self._threads = []
@@ -695,10 +812,37 @@ class HeadProcess:
         if action is None:
             return
         with self._wake:
-            if not self._actions or self._actions[-1][0] != action:  # A faulted arms' loop repeats its action.
+            if not self._actions or self._actions[-1][:2] != ('action', action):  # A faulted loop repeats its action.
                 self._numbered += 1
-                self._actions.append((action, self._numbered))
+                self._actions.append(('action', action, self._numbered))
             self._wake.notify()
+
+    @property
+    def restartable(self):
+        """Whether a restart can reach the head: its process built it and runs on (it ended: no)."""
+        with self._lock:
+            alive = self._process is not None and self._closed is None and not self._closing
+            return bool(self.session) and alive and not self._fault and self._process.is_alive()
+
+    def restart(self):
+        """Ask the head's process to re-arm the faulted head (HeadTeleop.restart), after the actions before it. The
+        outcome comes back in its status: `restart_pending`, then `fault` (None once re-armed) and `restart_refused`."""
+        with self._wake:
+            self._restarts += 1
+            self._actions.append(('restart', self._restarts))
+            self._wake.notify()
+
+    @property
+    def restart_pending(self):
+        with self._lock:
+            return self._word.get('restart', (0, None))[0] < self._restarts
+
+    @property
+    def restart_refused(self):
+        """Why the last restart did not re-arm the head, once it was taken; None if it did, or none was asked."""
+        with self._lock:
+            number, refused = self._word.get('restart', (0, None))
+            return refused if number == self._restarts else None
 
     @property
     def pending(self):
@@ -754,8 +898,8 @@ class HeadProcess:
                 self._actions.clear()
                 self._pose = None
             try:
-                for action, number in actions:
-                    self._conn.send(('action', action, number))
+                for message in actions:
+                    self._conn.send(message)
                 if pose is not None:
                     self._conn.send(('pose', *pose))
                 if closing:

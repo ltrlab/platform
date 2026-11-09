@@ -23,12 +23,19 @@ class DirectLifecycleSession(GuardedLifecycleSession):
         period_s=0.02,
         cycle_budget_s=0.035,
         hold_budget_s=None,
+        fresh_offers=False,
         clock=time.perf_counter,
     ):
         """`hold_budget_s`: how long a cycle following nothing (Idle, Enable, a hold: no target) may take before its
         command goes out, at most that command's lifetime, which the receiver bounds it by (default: the cycle
         budget). The head's receiver answers each request at its next 10 ms tick, and Idle takes it and a fresh
-        offer first: 37 ms on the Jetson, past the 35 ms of a following cycle (2026-10-31)."""
+        offer first: 37 ms on the Jetson, past the 35 ms of a following cycle (2026-10-31).
+
+        `fresh_offers`: every cycle takes a fresh offer just before its command, instead of the one in the reply
+        before. A command's lifetime counts from its offer, so with the reply's offer a period of the session's has
+        already gone from it when it is sent: the head's 40 ms of its 100 ms, which left a cycle about 20 ms to be
+        late, less the jitter of its service's ticks. A hold 10 ms late, answered at a tick 13 ms late, expired
+        (2026-11-08, live-head-20261108T180840Z, "command_expired · wrong_owner"). It costs an exchange per cycle."""
         names = tuple(j['name'] for j in config['joints'])
         if (
             not config.get('direct')
@@ -62,6 +69,7 @@ class DirectLifecycleSession(GuardedLifecycleSession):
         self._cached = None
         self._samples = None
         self._offer_received = None
+        self.fresh_offers = bool(fresh_offers)
         self.command_ms = config['direct']['command_ms']
 
     def _cache(self, reply, started):
@@ -134,8 +142,8 @@ class DirectLifecycleSession(GuardedLifecycleSession):
                 self._cached = None
                 if status['state'] != 'disarmed':
                     raise ValueError('Receiver must be disarmed before Idle')
-            # Outside active following, refresh feedback/authority explicitly.
-            offered, rows, feedback = self._cached or self._offer()
+            # Outside active following, refresh feedback/authority explicitly; with fresh offers, every cycle does.
+            offered, rows, feedback = (None if self.fresh_offers else self._cached) or self._offer()
             self.last_feedback = plain_copy(rows)
             now = self.clock()
             # Preserve the observations even if proposal construction faults.
