@@ -656,9 +656,11 @@ function renderHead(state) {
   $('head-readout').className = view.fault ? 'bad' : 'muted';
   $('head-headset').textContent = view.headset;
   $('head-zero').disabled = !view.zero;
+  $('head-restart').hidden = !view.restart;
 }
 $('head-zero').onclick = () =>
   act('/api/helm/xr/zero', {}, "Zeroed: where the headset looks is the head's straight ahead.");
+$('head-restart').onclick = () => act('/api/helm/teleop/head/restart', {}, 'Restarting the head…');
 
 // Settings → Headset: the headset's state, Zero, the 3D view's preview and what the headset shows (headset_mirror.js).
 const headsetMirror = new HeadsetMirror({

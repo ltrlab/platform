@@ -289,6 +289,7 @@ def create_app(
                 '/api/helm/teleop/pedal',
                 '/api/helm/teleop/route',
                 '/api/helm/teleop/zero',
+                '/api/helm/teleop/head/restart',
                 '/api/helm/teleop/target',
                 '/api/helm/teleop/receiver',
                 '/api/helm/settings/apply',
@@ -975,6 +976,13 @@ def create_app(
         await off_loop(teleop.set_zero)
         return state_response()
 
+    async def teleop_head_restart(request):
+        """Restart head: re-arm a faulted head where its receiver holds it, while the arms hold."""
+        await body(request)
+        need_teleop()
+        await off_loop(teleop.restart_head)
+        return state_response()
+
     async def gripper_zero_run(request):
         """Zero one gripper at its fully closed jaws, after the operator's confirmation (helm.gripper_zero)."""
         payload = await body(request)
@@ -1552,6 +1560,7 @@ def create_app(
     app.router.add_get('/api/helm/settings', settings_get)
     app.router.add_post('/api/helm/settings/{action}', settings_action)
     app.router.add_post('/api/helm/teleop/zero', teleop_zero)
+    app.router.add_post('/api/helm/teleop/head/restart', teleop_head_restart)
     app.router.add_post('/api/helm/teleop/target', teleop_target)
     app.router.add_post('/api/helm/teleop/receiver', teleop_receiver)
     app.router.add_post('/api/helm/leaders/connect', leaders_connect)

@@ -269,7 +269,9 @@ ahead and level and press Start head tracking. The head follows once the session
 click or **Zero headset** (Head card, Settings → Headset) makes where the headset looks the head's straight ahead. The headset
 shows the head camera, optionally as a 3D picture from its depth, the model, and the wrist cameras on the model's wrists;
 A or X opens a ring of controls. Settings → Headset lists the links and *Preview in the 3D view*. One headset steers at a time.
-It needs a login, not control. **X** returns the head to its rest. See [neck](../robots/minerva/NECK_FEETECH.md) and
+It needs a login, not control. **X** returns the head to its rest. If the head faults, the arms hold and the Head card shows
+why; while they hold, **Restart head** re-arms a head its receiver stopped where it holds it, and Engage (T) follows with it
+([troubleshooting](TROUBLESHOOTING.md)). See [neck](../robots/minerva/NECK_FEETECH.md) and
 [headset 3D](../architecture/HEADSET_3D_PLAN.md) for detail, and [the headset on a slow link](REMOTE_HEADSET.md) for `/xr?remote`.
 
 **Headset as input.** With **Input: Headset** the Quest's controllers drive the arms. Engage (T) raises a hanging arm to a

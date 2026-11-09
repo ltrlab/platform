@@ -46,6 +46,28 @@ assert.equal(
 assert.equal(headView({ phase: 'running', head: null }, { connected: true }, 'h').readout, 'No head in this session.');
 assert.equal(headView(null, { connected: true, tracking: false }, 'h').shown, true);
 
+// A head its receiver stopped, while the arms hold: Restart head can act (helm/teleop.py says when); while it
+// restarts the card says so, and nothing else can restart it.
+assert.equal(idle.restart, false);
+const stopped = headView(
+  { head: { state: 'FAULT', fault: 'Head receiver stopped: command_expired', restartable: true } },
+  {},
+  'h',
+);
+assert.deepEqual(
+  [stopped.readout, stopped.fault, stopped.restart],
+  ['Head receiver stopped: command_expired', true, true],
+);
+const restarting = headView(
+  { head: { state: 'FAULT', fault: 'Head receiver stopped: command_expired', restarting: true, restartable: false } },
+  {},
+  'h',
+);
+assert.deepEqual(
+  [restarting.readout, restarting.fault, restarting.restart],
+  ['Restarting the head where its receiver holds it…', false, false],
+);
+
 assert.equal(signedDegrees(0), '+0°');
 assert.equal(signedDegrees(-Math.PI / 2), '-90°');
 

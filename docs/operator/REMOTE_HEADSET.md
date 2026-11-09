@@ -94,7 +94,9 @@ camera stopped, not the link. No file and no worker means the page was on the or
   depends on the Quest's checks arriving first.
 - The worker beside the arms, and arm control over the channel.
 - **The head faulted with `command_expired` in both hotspot sessions** (3 to 4 minutes into following) while the arms kept every
-  cycle on time. A command's lifetime counts from the reply before it, so the head's 100 ms `command_ms` spans two 40 ms gaps and
-  leaves about 20 ms; the receiver checks expiry at each 10 ms tick, so the next command must be read within one tick of its due
-  time. Nothing records where the milliseconds went, and 29 minutes on the LAN on the same CPUs had no fault. Feedback older than
-  60 ms or more than 80 ms between steps also fault the head. The margin is thin in any session.
+  cycle on time, and once on the LAN (2026-11-08, holding, about 6 minutes in). Each command took the offer in the reply before
+  it, so of its 100 ms `command_ms` a cycle had about 20 ms to be late, less the service's tick jitter. Each now takes a fresh
+  offer just before it ([neck](../robots/minerva/NECK_FEETECH.md)): offline, a hold keeps its command 44 ms late and following
+  34 ms. Not yet tried on the robot. Fault records now keep the last cycles' timings, so the next one shows where the
+  milliseconds went. Feedback older than 60 ms or more than 80 ms between steps still fault the head, and **Restart head**
+  re-arms one its receiver stopped.

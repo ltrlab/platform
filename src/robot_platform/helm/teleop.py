@@ -525,6 +525,7 @@ class TeleopCore:
         # its own (helm.head_teleop.HeadProcess), never in the arms' loop nor their interpreter. Virtual, its harness
         # answers at once, and it cycles on the arms' ticks.
         self.head_process, self._head_loop, self._head_noticed = bool(self.live_arm), None, False
+        self._head_restarting = False  # A restart (restart_head) its process has not answered yet.
         if bundle.get('head') is not None:
             from .head_teleop import HeadTeleop
 
@@ -1582,6 +1583,9 @@ class TeleopCore:
         from robot_platform.teleop.guarded_lifecycle import minerva_action
 
         self._input_timing = {}
+        if getattr(self, '_head_restarting', False) and not self.head.restart_pending:
+            self._head_restarting = False
+            self._head_restarted(self.head.restart_refused)
         if getattr(self, '_head_loop', None) is not None and self.head.fault and not self._head_noticed:
             # The head faulted in its own process: the arms hold this cycle, as after a failed inline head cycle.
             self._head_noticed = self._head_hold = True
@@ -1646,8 +1650,8 @@ class TeleopCore:
             if engaged and action not in ('disable', 'shutdown'):
                 action = 'disengage'
                 notice = (
-                    f'{self.head.fault} · The arms hold: Engage (T) follows again without the head; stop '
-                    'the session to start the head again.'
+                    f'{self.head.fault} · The arms hold: Engage (T) follows again without the head. Restart head '
+                    '(the Head card) re-arms it where its receiver holds it, while the arms hold.'
                 )
         if getattr(self, '_camera_hold', False):
             self._camera_hold = False
@@ -1884,11 +1888,73 @@ class TeleopCore:
         if getattr(self, 'head', None) is not None:
             self.head.pose(yaw, pitch)
 
+    def _head_restart_refusal(self):
+        """Why the head cannot restart now (restart_head), or None: it faulted in a running session, its receiver
+        can be asked (it started, and its process runs on), and the arms hold, with no fault of their own: a head
+        re-armed beside following arms would hold where it stopped while they moved."""
+        head = getattr(self, 'head', None)
+        if head is None:
+            return 'This session has no head'
+        if self.phase != 'running' or self.session is None:
+            return 'Restart the head in a running session'
+        if getattr(self, '_head_restarting', False):
+            return 'The head is restarting'
+        if not head.fault:
+            return 'The head has no fault to restart from'
+        if not getattr(head, 'restartable', False):
+            return 'The head never started or its process ended: stop the session to start it again'
+        if self.fault or self.landing:
+            return "The arms' own fault ends the session: stop it to start the head again"
+        if self.session.lifecycle.state in ('ENGAGING', 'TELEOP', 'SHUTDOWN'):
+            return 'Hold the arms first (T): the head restarts while they hold'
+        return None
+
+    def restart_head(self):
+        """The operator's Restart head: re-arm the faulted head where its receiver holds it (HeadTeleop.restart),
+        holding; Engage (T) then follows with it. In its own process (live) the outcome comes back in its status
+        (`_head_restarted`, at a later tick); virtual, at once. Raises ValueError when it cannot."""
+        refusal = self._head_restart_refusal()
+        if refusal:
+            raise ValueError(refusal)
+        self._event('head_restart', reason=self.head.fault)
+        if getattr(self, '_head_loop', None) is not None:
+            self.head.restart()
+            self._head_restarting = True
+            self.message = f'{self._receiver_name} · Restarting the head where its receiver holds it…'
+            return {'restarting': True}
+        try:
+            self.head.restart()
+        except ValueError as exc:
+            self._head_restarted(str(exc))
+            raise
+        self._head_restarted(None)
+        return {'restarting': False}
+
+    def _head_restarted(self, refused):
+        """A restart's outcome. Re-armed, the head's next fault is noticed (and holds the arms) as its first was."""
+        if refused is None and not self.head.fault:
+            self._head_noticed = False
+            self._event('head_restarted')
+            self.message = (
+                f'{self._receiver_name} · HOLD · The head is re-armed where its receiver held it and holds there. '
+                'Engage (T) follows with it.'
+            )
+        else:
+            self._event('head_restart_refused', reason=refused or self.head.fault)
+            self.message = (
+                f'{self._receiver_name} · The head did not restart: {refused or self.head.fault}. The arms hold: '
+                'Engage (T) follows without the head, or stop the session to start it again.'
+            )
+
     def _head_status(self):
         head = getattr(self, 'head', None)
         if head is None:
             return None
-        return head.status() if head.session is not None else {'state': None, 'fault': head.fault}
+        status = head.status() if head.session is not None else {'state': None, 'fault': head.fault}
+        # Whether the Head card's Restart head can act now, and while one is under way.
+        status['restartable'] = status.get('fault') is not None and self._head_restart_refusal() is None
+        status['restarting'] = bool(getattr(self, '_head_restarting', False))
+        return status
 
     def _held(self):
         """Whether the receiver brakes or holds the arm itself (after a trip, or the stop a failed cycle asked
@@ -2636,6 +2702,15 @@ def run_loop(commands, views, core, *, silence_s=None):
                     _, request, *arguments = message
                     try:
                         reply(request, None, (core.route if message[0] == 'route' else core.set_zero)(*arguments))
+                    except Exception as exc:
+                        reply(request, str(exc) or type(exc).__name__)
+                elif message[0] == 'head_restart':
+                    view_changed = True
+                    _, request = message
+                    try:
+                        if closing:
+                            raise ValueError('The session is shutting down')
+                        reply(request, None, core.restart_head())
                     except Exception as exc:
                         reply(request, str(exc) or type(exc).__name__)
                 elif message[0] == 'manual_tuning':
@@ -3469,6 +3544,10 @@ class TeleopSession:
         if self.leaders is not None:
             self.leaders.store_reference(zero)
         return zero
+
+    def restart_head(self, timeout=5.0):
+        """Re-arm a faulted head where its receiver holds it, while the arms hold (TeleopCore.restart_head)."""
+        return self._request('head_restart', timeout=timeout)
 
     def stop(self, timeout=45.0):
         # The loop lowers an enabled arm before it closes the receiver: seconds at the shutdown speed.

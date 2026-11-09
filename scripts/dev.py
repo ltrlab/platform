@@ -184,6 +184,7 @@ CORE = [
     'tests/contract/test_helm_tune_head.py',
     'tests/contract/test_head_teleop.py',
     'tests/contract/test_teleop_head.py',
+    'tests/contract/test_head_margin.py',
     'tests/unit/test_helm_xr.py',
     'tests/unit/test_helm_webrtc.py',
     'tests/unit/test_minerva_network.py',
