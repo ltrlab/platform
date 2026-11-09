@@ -505,6 +505,11 @@ class TeleopCore:
         self.recording_fault = None  # Evidence failure locks following, without becoming a receiver fault.
         self._recording_hold_confirmed = False
         self.task_capture = None
+        # A failed episode, or a capture that stopped, ends that recording only (_check_capture): the arms hold once
+        # (_episode_hold, with _episode_notice), and Engage and Record work again. The session's own evidence above
+        # still latches RECORDING FAILED.
+        self._episode_hold, self._episode_notice, self._episode_seen = False, None, None
+        self._capture_lost = None  # Why the capture stopped: nothing more records this session.
         self._capture_exchange_started = None
         self._pending_latency = None
         self._loop_timings = deque(maxlen=CYCLE_HISTORY)
@@ -1438,7 +1443,12 @@ class TeleopCore:
         if self.recording_fault:
             raise ValueError('Recording failed; stop this session before starting another episode')
         if self.task_capture is None:
-            raise ValueError('Set up the task before starting this session')
+            raise ValueError(self._no_capture_reason())
+        if action == 'start_record' and getattr(self, '_capture_lost', None):
+            raise ValueError(
+                f'Recording stopped in this session ({self._capture_lost}): stop the session and start it again to '
+                'record'
+            )
         state = self.session.lifecycle.state if self.session else None
         if action == 'reset' and (self.live_arm or state not in ('DISABLED', 'IDLE')):
             raise ValueError('Reset is only available with the simulated receiver disabled or idle')
@@ -1448,6 +1458,11 @@ class TeleopCore:
         if isinstance(result, dict) and 'id' in result:
             self.pedals.capture_command(action, result)
         return result
+
+    def _no_capture_reason(self):
+        """Why this session records nothing, as Helm decided when it started (TeleopSession._session_capture)."""
+        bundle = getattr(self, 'bundle', None) or {}
+        return bundle.get('task_capture_unavailable') or 'This session records nothing'
 
     def _capture_label(self):
         """Who drives the frames the capture records now (data.task_capture's authority) and the lifecycle state: in a
@@ -1493,18 +1508,50 @@ class TeleopCore:
 
     def _check_recording(self):
         if self.task_capture is not None:
-            health = getattr(self.task_capture, 'health', None)
-            task = health() if health is not None else self.task_capture.snapshot()
-            recording = task.get('recording') or {}
-            error = task.get('error') or recording.get('error')
-            if task.get('failed') or (
-                error and (recording.get('active') or recording.get('state') in ('failed', 'aborted'))
-            ):
-                raise RecordingError(error or 'Task capture failed')
+            self._check_capture()
         if self._recording_error is not None:
             raise RecordingError(self._recording_error)
         if self._recorder is not None:
             self._recorder.check()
+
+    def _check_capture(self):
+        """A failed episode, or a capture that stopped, ends that recording, never the session: the left wrist camera
+        dropped off USB 6 s into an episode (live-20261109T004323Z) and RECORDING FAILED then locked following, Engage
+        and recording, and stopped the session's event log, until the session was stopped. Now the arms hold once
+        (as when a camera drops off USB), the failure goes into the event log, and Engage follows again; Record starts
+        the next episode, the failed one's partial file kept with its reason. The session's own evidence (samples,
+        events) failing still latches RECORDING FAILED (_poll_recording)."""
+        health = getattr(self.task_capture, 'health', None)
+        task = health() if health is not None else self.task_capture.snapshot()
+        recording = task.get('recording') or {}
+        if task.get('failed'):
+            if getattr(self, '_capture_lost', None) is None:
+                self._capture_lost = task.get('error') or recording.get('error') or 'Task capture stopped'
+                self._event('capture_failed', error=self._capture_lost, file=recording.get('path'))
+                # Only an episode it was recording holds the arms; between episodes nothing they do changes.
+                recorded = recording.get('active') or recording.get('state') in ('recording', 'failed', 'aborted')
+                self._episode_hold = bool(recorded)
+                self._episode_notice = (
+                    f'Recording stopped: {self._capture_lost}.'
+                    + (' The arms hold: Engage (T) follows again.' if recorded else '')
+                    + ' Stop the session and start it again to record.'
+                )
+                if not recorded:
+                    self.message = self._episode_notice
+            return
+        error = recording.get('error')
+        if recording.get('state') not in ('failed', 'aborted') or not error:
+            return
+        episode = recording.get('episode') or (recording.get('path'), error)  # Each failed episode once.
+        if episode == getattr(self, '_episode_seen', None):
+            return
+        self._episode_seen = episode
+        self._event('episode_failed', error=error, file=recording.get('path'), frames=recording.get('frames'))
+        self._episode_hold = True
+        self._episode_notice = (
+            f'Episode failed: {error}. Its partial file is kept. The arms hold: Engage (T) follows again, and Record '
+            'starts the next episode.'
+        )
 
     def _recording_notice(self):
         state = self.session.lifecycle.state if self.session else None
@@ -1657,6 +1704,13 @@ class TeleopCore:
                     f'Paused: {self._camera_dropped} dropped off USB. The arms hold: Engage (T) follows again '
                     'once it is back.'
                 )
+        if getattr(self, '_episode_hold', False):
+            self._episode_hold = False  # Once per failed episode (_check_capture).
+            if engaged and action not in ('disable', 'shutdown'):
+                action = 'disengage'
+            elif action in ('enable', 'engage'):
+                action = None  # A key queued with the failure never beats its hold: press it again.
+            notice = self._episode_notice
         capture_hold = False
         if self.recording_fault and action not in ('disable', 'shutdown'):
             # Never poll/reuse leader targets or allow a queued enable/engage
@@ -2223,6 +2277,10 @@ class TeleopCore:
                 'holding': self.session.blocked if self.session else None,
             },
             'task': self.task_capture.snapshot() if getattr(self, 'task_capture', None) is not None else None,
+            # Why Record is unavailable all session, else why it stopped (the Task card says so).
+            'task_unavailable': self._no_capture_reason()
+            if getattr(self, 'task_capture', None) is None
+            else getattr(self, '_capture_lost', None),
             'grip_feedback': self._grip_status(),
             'replay': self._replay_view(),
             'policy': self._policy_view(),
@@ -2804,8 +2862,7 @@ class TeleopSession:
             raise ValueError('The simulated Minerva runs on this PC')
         self.sim_directory = Path(runs) / (helm.asset_id + '-sim')
         self.capture_profile = Path(capture_profile).resolve() if capture_profile is not None else None
-        self.task_configured = False
-        self.task_capture_config = None
+        self.task_configured = False  # The simulator's task scene is chosen (Set up task, simulation only).
         self.target, self.edge_factory = target, edge_factory  # edge_factory: tests build the EdgeWorker.
         # Or live on one arm, or both ({'mode': 'live', 'arm': 'left' | 'right' | 'both'}); virtual may enforce the
         # two-arm bound ({'mode': 'virtual', 'collision': 'motion'}).
@@ -2868,6 +2925,37 @@ class TeleopSession:
         worker = self._worker
         return worker is not None and worker.is_alive()
 
+    def recording_unavailable(self):
+        """Why a session started now would record nothing, or None; the capture profile itself is read and checked
+        when the session starts (_session_capture)."""
+        if self.simulation is not None:
+            if self.simulation.get('task_scene'):
+                return None
+            return 'Recording in the simulator needs its task scene: Set up task before the session'
+        if self.receiver != {'mode': 'live', 'arm': 'both'}:
+            return 'Recording needs both arms live: choose Live and Both, then start a session'
+        if self.capture_profile is None:
+            return 'Helm was started without a capture profile (--capture-profile), so it cannot record'
+        return None
+
+    def _session_capture(self):
+        """The capture a session records with ({'task_capture': config}), else why it has none
+        ({'task_capture_unavailable': reason}). Every session on Live both arms prepares it from the capture profile
+        Helm started with, so Record works in any of them: there is no setup step before the session (2026-11-08: a
+        session started without it could never record). The simulator's capture comes with its task scene, chosen
+        before the session (Set up task)."""
+        reason = self.recording_unavailable()
+        if reason is not None:
+            return {'task_capture_unavailable': reason}
+        if self.simulation is not None:
+            return {}  # The simulated scene's own capture (the harness's task view).
+        from .task_capture import validate_config
+
+        try:
+            return {'task_capture': validate_config(json.loads(self.capture_profile.read_text(encoding='utf-8')))}
+        except (OSError, ValueError) as exc:
+            return {'task_capture_unavailable': f'The capture profile cannot be used: {exc}'}
+
     def _bundle(self):
         helm = self.helm
         return {
@@ -2883,7 +2971,7 @@ class TeleopSession:
             'receiver': dict(self.receiver),
             'leader_ranges': deepcopy(self.leaders.saved) if self.leaders is not None else None,
             'servo': self._servo(),
-            **({'task_capture': deepcopy(self.task_capture_config)} if self.task_capture_config is not None else {}),
+            **self._session_capture(),
             **(
                 {'simulation': dict(self.simulation, directory=str(self.sim_directory))}
                 if self.simulation is not None and self.receiver['mode'] == 'virtual'
@@ -2983,23 +3071,17 @@ class TeleopSession:
 
     def task_action(self, action):
         if action == 'setup':
+            # The simulator's task scene (cube, table, bucket), chosen before its session. On the robot every Live both
+            # arms session records (_session_capture): there is nothing to set up.
             with self._lock:
-                if self.active:
-                    raise ValueError('Stop the session before task setup')
-                if self.simulation is not None:
-                    self.simulation['task_scene'] = True
-                else:
-                    if self.receiver != {'mode': 'live', 'arm': 'both'}:
-                        raise ValueError('Select Live both arms before task setup')
-                    if self.capture_profile is None:
-                        raise ValueError(
-                            'Live capture needs --capture-profile with verified camera identities and clocks'
-                        )
-                    from .task_capture import validate_config
-
-                    self.task_capture_config = validate_config(
-                        json.loads(self.capture_profile.read_text(encoding='utf-8'))
+                if self.simulation is None:
+                    raise ValueError(
+                        'Nothing to set up on the robot: every session on Live both arms can record. Start one and '
+                        'press Record while the arms hold or follow'
                     )
+                if self.active:
+                    raise ValueError('Stop the session before choosing the task scene')
+                self.simulation['task_scene'] = True
                 self.task_configured = True
             return
         if action not in ('reset', 'start_record', 'stop_record'):
@@ -3115,13 +3197,6 @@ class TeleopSession:
                 raise ValueError('A replay, a policy or the headset drives the arms: choose Left, Right or Both for it')
             if self.simulation is not None and (self.target != 'pc' or self.receiver['mode'] != 'virtual'):
                 raise ValueError('Simulation mode needs the virtual receiver on this PC')
-            if (
-                source is None
-                and not head
-                and self.task_capture_config is not None
-                and self.receiver != {'mode': 'live', 'arm': 'both'}
-            ):
-                raise ValueError('Configured task capture requires Live both arms')
             if self._tuning_lock.locked():
                 raise ValueError('Wait for the tuning operation before starting')
             if self.receiver['mode'] == 'live' and getattr(self.helm, 'connection', 'tether') not in WIRED:
@@ -3177,16 +3252,21 @@ class TeleopSession:
                         'Limits → Head first'
                     )
                 bundle.pop('task_capture', None)  # Nothing is recorded: the arms are not in the session.
+                bundle['task_capture_unavailable'] = 'A session of the head alone records nothing'
             if source is not None and source['kind'] == 'episode':
                 # The episode on this PC from Helm's --episodes; on the robot from its own recordings.
                 bundle['source'] = dict(source, root=str(self.episodes_root) if local and self.episodes_root else None)
                 bundle.pop('task_capture', None)  # A replay is never recorded: no capture process.
+                bundle['task_capture_unavailable'] = (
+                    'A replay is not recorded: a replayed episode is not a demonstration'
+                )
             elif source is not None:
                 bundle['source'] = dict(source)
                 if source['kind'] == 'headset' or self.receiver != {'mode': 'live', 'arm': 'both'}:
                     # A rollout is recorded on both live arms only, its frames labelled policy or correction; the
                     # cameras feed the policy beside the capture. A headset session is not recorded yet.
-                    bundle.pop('task_capture', None)
+                    if bundle.pop('task_capture', None) is not None:
+                        bundle['task_capture_unavailable'] = 'A headset session is not recorded yet'
                 if source['kind'] == 'policy' and not local and self.capture_profile is not None:
                     from .task_capture import validate_config
 
@@ -3536,6 +3616,7 @@ class TeleopSession:
                 receiver_choices=choices if self.simulation is None else ['virtual'],
                 simulation=self.simulation is not None,
                 task_configured=self.task_configured,
+                recording_unavailable=self.recording_unavailable(),
                 observation_age_ms=age,
                 status_age_ms=status_age,
                 control_law=law,

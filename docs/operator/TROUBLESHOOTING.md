@@ -88,7 +88,10 @@ not the last.
 | `Leader input lost; holding measured pose until Engage` | The leader samples stopped for 80 ms. Check the bridge, the leaders' USB and the link, then **T**. |
 | `Disable could not be confirmed: ... Use the foot switch; the session remains faulted.` | The software Disable did not confirm. Use the foot switch. |
 | `Lowering stopped: ... Stop the session and start it again.` | The lowering failed. Support the arm, **H**. |
-| `RECORDING FAILED · <reason> · ...` | A camera, the disk or the writer failed. The arms hold, following is locked. H disables; X or Stop session returns to the reference. Restart the session. |
+| `Episode failed: <reason>. Its partial file is kept. ...` | A camera stalled or dropped (the reason names it), the data went stale, or the writer or disk failed during that episode. The arms hold once; T follows again and Record starts the next episode when every camera is fresh. A camera that keeps failing: reseat its USB cable. |
+| `Recording stopped: <reason>. ... Stop the session and start it again to record.` | The capture process stopped. The session goes on without recording; restart it to record. Its `capture-worker-*.stderr.log` is beside the episodes. |
+| `RECORDING FAILED · <reason> · ...` | The session's own evidence log (samples, events) failed, usually the disk. The arms hold, following is locked. H disables; X or Stop session returns to the reference. Restart the session. |
+| `Nothing to set up on the robot: ...` | There is no setup step on the robot (a page from an older Helm still shows the button). Start a session on Live and Both and press Record. |
 | `<name> left Run mode while driven (it rebooted, or its own watchdog disabled it)` | That motor lost power or its watchdog fired. Support the arm, press H, power-cycle. |
 | `Helm went silent for 5 s` (in the evidence) | Helm stopped or restarted during a session; the loop lowered and disabled the arm. |
 | `Minerva's UPS battery is critical ...` | The UPS is shutting the Jetson down. Plug in the charger. |

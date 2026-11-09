@@ -158,6 +158,19 @@ def test_camera_cutoff_never_uses_future_received_frame_and_skew_is_bounded():
         cache.select(10.06)
 
 
+def test_no_coherent_set_names_the_camera_that_fell_behind():
+    """Live, live-20261109T004323Z: the left wrist camera dropped off USB 6 s into an episode, which failed with only
+    'camera publisher timestamp skew exceeds the capture profile'. The bound is unchanged; the error names the camera
+    whose newest frame fell behind the others'."""
+    cache = CameraCache(config())
+    fill(cache)  # Every camera's frame sampled at 10.0.
+    for name in ('right_wrist', 'head'):
+        assert cache.ingest(name, camera(name, 1000.05), received_at=10.06, wall_time=1000.06)  # Sampled at 10.05.
+        cache.frames[name].popleft()
+    with pytest.raises(ValueError, match="skew exceeds the capture profile: left_wrist's newest frame is 50 ms older"):
+        cache.select(10.07)
+
+
 def test_unequal_camera_rates_select_real_history_without_relaxing_limits():
     cfg = config()
     cfg['camera_roles'] = ['right_wrist', 'head']
@@ -525,14 +538,41 @@ def test_socket_worker_records_only_with_a_live_head(socket_capture):
     assert capture.snapshot()['head']['fresh']
 
 
+def failed_episode(capture):
+    recording = capture.snapshot()['recording']
+    return recording.get('state') == 'failed' and recording.get('error')
+
+
+def test_a_camera_that_stops_mid_episode_ends_only_that_episode_and_the_next_one_records(socket_capture):
+    """Live, live-20261109T004323Z: the left wrist camera dropped off USB 6 s into an episode. The episode failed and
+    so did the whole capture, so nothing could record until the session was stopped. A failed episode keeps its
+    partial file and its reason; the capture goes on, and records the next episode once the camera is back."""
+    capture, writers, pump = socket_capture
+    pump(lambda: capture.snapshot()['capture_ready'])
+    capture.command('start_record')
+    pump(lambda: writers and len(writers[0].frames) >= 2)
+    pump(lambda: failed_episode(capture), missing=('left_wrist',))
+    state = capture.snapshot()
+    assert 'left_wrist' in state['recording']['error'] and state['recording']['episode'] == 1
+    assert writers[0].error and not writers[0].complete  # Aborted, never published.
+    assert not state['failed'] and state['available'] and state['error'] is None
+    pump(lambda: capture.snapshot()['capture_ready'])  # The camera is back.
+    capture.command('start_record')
+    pump(lambda: len(writers) == 2 and len(writers[1].frames) >= 2)
+    capture.command('stop_record')
+    pump(lambda: writers[1].complete)
+    assert capture.snapshot()['recording']['episode'] == 2 and not writers[1].error
+
+
 def test_a_head_that_stops_while_recording_fails_the_episode_closed(socket_capture):
     capture, writers, pump = socket_capture
     pump(lambda: capture.snapshot()['capture_ready'])
     capture.command('start_record')
     pump(lambda: writers and len(writers[0].frames) >= 2)
-    pump(lambda: capture.snapshot()['failed'], missing=('head_pose',))
-    assert 'head' in capture.snapshot()['error']
+    pump(lambda: failed_episode(capture), missing=('head_pose',))
+    assert 'head' in capture.snapshot()['recording']['error']
     assert writers[0].error and not writers[0].complete  # Aborted, never published.
+    assert not capture.snapshot()['failed']  # The capture goes on: the next episode records with a live head.
 
 
 @pytest.mark.parametrize('socket_capture', [{'hz': 20.0}, {'hz': 15.0}], indirect=True)
@@ -582,9 +622,10 @@ def test_a_receiver_stalled_after_a_slow_open_still_fails_the_episode(socket_cap
     capture, writers, pump = socket_capture
     pump(lambda: capture.snapshot()['capture_ready'])
     capture.command('start_record')
-    pump(lambda: capture.snapshot()['failed'], receiver=False)
+    pump(lambda: failed_episode(capture), receiver=False)
     assert writers and not writers[0].frames and not writers[0].complete
     assert 'expired' in (writers[0].error or '')
+    assert not capture.snapshot()['failed']  # The episode failed; the capture records the next one.
 
 
 def test_socket_worker_aborts_stalled_receiver_without_completed_episode(socket_capture):
@@ -592,9 +633,13 @@ def test_socket_worker_aborts_stalled_receiver_without_completed_episode(socket_
     pump(lambda: capture.snapshot()['capture_ready'])
     capture.command('start_record')
     pump(lambda: writers and len(writers[0].frames) >= 1)
-    pump(lambda: capture.snapshot()['failed'], receiver=False)
+    pump(lambda: failed_episode(capture), receiver=False)
     assert writers[0].error and not writers[0].complete
-    assert not capture.snapshot()['available']
+    state = capture.snapshot()
+    assert not state['capture_ready'] and not state['failed']  # Not ready without the receiver; not ended either.
+    pump(lambda: capture.snapshot()['capture_ready'])  # The receiver is back.
+    capture.command('start_record')
+    pump(lambda: len(writers) == 2 and len(writers[1].frames) >= 1)
 
 
 class GatedTeardown:
@@ -616,21 +661,18 @@ class GatedTeardown:
 
 
 @pytest.mark.parametrize('socket_capture', [{'context': GatedTeardown}], indirect=True)
-@pytest.mark.parametrize('end', ['stalled receiver', 'abort'])
-def test_a_failed_capture_never_reads_as_available_or_ready(socket_capture, end):
+def test_a_failed_capture_never_reads_as_available_or_ready(socket_capture):
     """The worker reports its failure before its teardown (writer, sockets, context) ends. Read in between, the
-    capture must already be neither available nor ready, as ProcessCapture.health reports a failed child."""
+    capture must already be neither available nor ready, as ProcessCapture.health reports a failed child. (A
+    stalled receiver ends only its episode now: test_socket_worker_aborts_stalled_receiver_without_completed_episode.)"""
     capture, writers, pump = socket_capture
     pump(lambda: capture.snapshot()['capture_ready'])
     gate = GatedTeardown.made[-1]
     try:
         capture.command('start_record')
         pump(lambda: writers and len(writers[0].frames) >= 1)
-        if end == 'abort':
-            capture.abort('Receiver no longer has active emitted command authority')
-            pump(gate.ending.is_set)
-        else:
-            pump(gate.ending.is_set, receiver=False)
+        capture.abort('Receiver no longer has active emitted command authority')
+        pump(gate.ending.is_set)
         for state in (capture.snapshot(), capture.health()):
             assert state['failed'] and not state['available'] and not state['capture_ready'], state
         assert writers[0].error and not writers[0].complete
@@ -1080,10 +1122,10 @@ def test_authority_loss_during_resize_aborts_even_if_new_valid_sample_arrives(so
 
     monkeypatch.setattr(task_capture, 'recording_images', lose_authority)
     capture.command('start_record')
-    pump(lambda: capture.snapshot()['failed'])
+    pump(lambda: failed_episode(capture))
     assert writers and not writers[0].frames and not writers[0].complete
     assert 'command authority' in writers[0].error
-    assert 'command authority' in capture.snapshot()['error']
+    assert 'command authority' in capture.snapshot()['recording']['error']
 
 
 def test_recording_transform_supports_legacy_pillow_without_resampling_enum(monkeypatch):

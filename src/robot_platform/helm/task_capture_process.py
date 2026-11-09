@@ -89,10 +89,10 @@ class LiveTaskCaptureProcess(ProcessCapture):
             ) or (last.get('action') == 'start_record' and last.get('state') == 'failed'):
                 self._record_requested = False
             recording_expected = self._record_requested or recording.get('active')
-        # Latch a transient loss before the latest-only mailbox can overwrite it.
+        # Latch a transient loss before the latest-only mailbox can overwrite it: it ends the episode, not the capture.
+        # The sample still goes to the child, whose view of the receiver then stays current for the next episode.
         if recording_expected and (sample.get('error') or not sample.get('command_valid')):
-            self.abort(sample.get('error') or 'Receiver no longer has active emitted command authority')
-            return
+            self.end_episode(sample.get('error') or 'Receiver no longer has active emitted command authority')
         self.submit(sample, source_time=sample.get('source_time'))
 
     def command(self, action, payload=None):
@@ -200,6 +200,10 @@ def _worker(*, factory=None, input_stream=None, output_stream=None):
                     raise ValueError('capture abort reason must be text')
                 view.abort(packet['abort'])
                 break
+            if packet.get('end_episode') is not None:
+                if not isinstance(packet['end_episode'], str) or not packet['end_episode']:
+                    raise ValueError('an episode end reason must be text')
+                view.end_episode(packet['end_episode'])  # Before this packet's commands: a new start_record follows.
             sample = packet.get('sample')
             if sample is not None:
                 view.receive_sample(_sample(sample))

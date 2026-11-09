@@ -121,7 +121,8 @@ date.
 - **Gripper force.** A grip is bounded only by the gripper motor's effort limit in the profile (14 Nm) and its gain: a stalled
   grasp holds about the hold gain times the command's lead, up to roughly 10 Nm with the current gains (2 Nm/rad over a 5.1 rad
   lead). Grippers are exempt from the tracking trip and do not release on a stop. A long grasp heats the motor toward the
-  70 C limit. A hold after a recording failure may remove a grip squeeze; object retention is not qualified.
+  70 C limit. A hold after a recording failure may remove a grip squeeze; object retention is not qualified through it, nor
+  through the hold after a failed episode or a camera drop.
 - **Head limits.** The head follows the headset inside its saved limits and a saved shoulder-clearance floor; live sessions
   take the head only once that clearance is saved. It follows at most 0.7 rad/s. Beyond that nothing protects the head, and
   its servos' own overheat alarm is the last guard.

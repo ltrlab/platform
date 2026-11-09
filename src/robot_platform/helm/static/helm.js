@@ -7,6 +7,7 @@ import { GRIP_SETTINGS, gripLive, gripSettingText, gripSliderValue, gripView } f
 import { upsView } from './ups.js';
 import { bridgeView, headsetLinks, networkView } from './network.js';
 import { headView } from './head.js';
+import { taskView } from './task_view.js';
 import { HeadsetMirror } from './headset_mirror.js';
 import { headSetupView } from './head_setup.js';
 import {
@@ -1396,44 +1397,31 @@ function renderTask(state) {
     simulation = state.mode === 'simulation';
   const recording = task.recording || {},
     active = recording.active === true || recording.state === 'recording';
-  const pending = task.last_command?.state === 'pending';
+  const view = taskView(state);
   $('task-mode').textContent = simulation ? 'SIMULATED CONTACT TASK' : 'BIMANUAL ROBOT CAPTURE';
   $('task-capability').textContent = simulation
     ? `${task.display_visual || 'Camera appearance is not reported yet.'} Dynamic object contacts with posed fingers; simulated arm response is not a validated coupled physics model. No synthetic grasp attachment.`
     : teleopView(t).mode === 'policy'
       ? "Records a policy rollout: the policy's stretches and your corrections in one episode, each frame labelled with who drove it. The export keeps each stretch and leaves out the holds and alignments between them."
-      : 'Records the current guarded receiver and existing camera streams. Both arms and grippers must be healthy; camera timing must be verified.';
-  $('task-setup').disabled = running || !t;
-  $('task-setup').textContent = configured ? 'Task configured' : 'Set up task';
+      : 'Every session on Live both arms can record, with no setup: Record (or pedal A) while the arms hold or follow, and again to finish. An episode that fails is kept as a partial file, and the next one starts in the same session.';
+  $('task-setup').hidden = !view.setup.shown; // The simulator's task scene; the robot needs no setup.
+  $('task-setup').disabled = !view.setup.enabled;
+  $('task-setup').textContent = configured ? 'Task scene chosen' : 'Set up task';
   $('task-reset').hidden = !simulation;
   $('task-reset').disabled =
     !!t?.recording_fault || !task.available || !running || active || !['DISABLED', 'IDLE'].includes(t?.state);
-  $('task-record').disabled =
-    !task.available ||
-    !task.capture_ready ||
-    !running ||
-    active ||
-    pending ||
-    task.failed ||
-    t?.recording_fault ||
-    !['HOLD', 'TELEOP'].includes(t?.state);
-  $('task-stop').disabled = !!t?.recording_fault || !running || !active || pending;
+  $('task-record').disabled = !view.record.enabled;
+  $('task-record').title = view.record.reason || 'Start recording an episode';
+  $('task-stop').disabled = !view.stop.enabled;
   const progress = task.task || {};
   $('task-state').textContent =
-    t?.recording_fault || task.error
-      ? 'Task needs attention.'
-      : !configured
-        ? 'Task not configured.'
-        : !running
-          ? 'Ready to start a session. Task controls do not enable motors.'
-          : task.display_phase ||
-            progress.phase ||
-            progress.stage ||
-            (task.available ? 'Task ready.' : 'Preparing task…');
+    simulation && running && !active && !view.failure && view.record.enabled
+      ? task.display_phase || progress.phase || progress.stage || view.status
+      : view.status;
   $('task-cameras').hidden = simulation;
   $('task-cameras').textContent =
     task.camera_summary || 'Camera preflight starts with the bimanual session; all configured streams are required.';
-  const summary = recording.state || (active ? 'recording' : configured ? 'idle' : 'not started');
+  const summary = recording.state || (active ? 'recording' : running ? 'idle' : 'not started');
   $('task-recording').textContent =
     `Recording: ${summary}` +
     (Number.isFinite(recording.frames) ? ` · ${recording.frames} frames` : '') +
@@ -1458,7 +1446,7 @@ for (const [id, action] of [
   ['task-stop', 'stop_record'],
 ]) {
   $(id).onclick = () =>
-    act('/api/helm/task', { action }, action === 'setup' ? 'Task configured; start the session when ready.' : null);
+    act('/api/helm/task', { action }, action === 'setup' ? 'Task scene chosen; start the session when ready.' : null);
 }
 
 // ---- Minerva Check -------------------------------------------------------------

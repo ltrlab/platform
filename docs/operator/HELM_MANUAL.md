@@ -296,10 +296,12 @@ splat map of the room. Stills have been taken live (first on 2026-11-02); no doc
 
 ## Recording
 
-**Mode: Direct** shows the task card (**Set up task**, **Record episode**, **Stop recording**, and **Reset simulated scene** in
-simulation). Full procedure: [task workflow](HELM_TASK_WORKFLOW.md). In short: set up the task, start the session, Idle,
-Enable, Engage; **A** or **Record episode** starts, again finishes. Wait for **Complete** before Shutdown. Recording needs
-all three cameras (left wrist, right wrist, head) fresh and the head's pose feed live, and refuses without a live head.
+**Mode: Direct** shows the task card (**Record episode**, **Stop recording**; **Set up task** and **Reset simulated scene** in
+simulation only). Full procedure: [task workflow](HELM_TASK_WORKFLOW.md). In short: choose **Live** and **Both**, start the
+session, Idle, Enable (and Engage to follow); **A** or **Record episode** starts, again finishes. There is no setup step on the
+robot, and when Record cannot act the card says why. Wait for **Complete** before Shutdown. Recording needs all three cameras
+(left wrist, right wrist, head) fresh and the head's pose feed live, and refuses without a live head. A failed episode keeps
+its partial file and its reason; the arms hold once, Engage follows again and Record starts the next episode.
 Episodes are HDF5 files under the receiver session folder (`~/minerva/evidence/live-<time>/episodes/`). Recording is
 [episode format 9](../data/EPISODE_FORMAT.md): 16 axes. **Format 9 has never run on the robot**; the running release recorded
 format 8 (14 axes, no torque), with one real demonstration at the last count.

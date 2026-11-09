@@ -109,10 +109,7 @@ def test_a_replay_session_carries_the_episode_never_records_and_asks_for_no_lead
         helm_stub(), TELEOP, runs=tmp_path, leaders=unswept, episodes=episodes, core_factory=lambda bundle: Core(bundle)
     )
     with pytest.raises(ValueError, match='Sweep and save the leader ranges'):
-        session.start()  # Teleop still needs the leaders,
-    session.task_capture_config = {'hz': 15}  # and once the task is set up for recording, both arms live.
-    with pytest.raises(ValueError, match='Configured task capture requires Live both arms'):
-        session.start()
+        session.start()  # Teleop still needs the leaders.
     with pytest.raises(ValueError, match='Replay runs at'):
         session.start(replay={'episode': EPISODE, 'speed': 2})
     session.start(replay={'episode': EPISODE, 'speed': 0.25})
@@ -128,6 +125,7 @@ def test_a_replay_session_carries_the_episode_never_records_and_asks_for_no_lead
             'root': str(episodes.resolve()),
         }
         assert 'task_capture' not in bundle
+        assert bundle['task_capture_unavailable'].startswith('A replay is not recorded')
         assert session.snapshot()['replay']['episode'] == EPISODE
     finally:
         session.stop()

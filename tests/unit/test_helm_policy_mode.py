@@ -12,6 +12,7 @@ import pytest
 from robot_platform.helm import edge
 from robot_platform.helm.edge import Inbox, serve
 from robot_platform.helm.server import create_app
+from robot_platform.helm.task_capture import validate_config
 from robot_platform.helm.teleop import TeleopSession
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -141,7 +142,7 @@ def test_a_policy_session_carries_the_policy_and_on_the_robot_the_cameras_not_a_
     session = TeleopSession(
         helm_stub(), TELEOP, runs=tmp_path, core_factory=lambda bundle: Core(bundle), capture_profile=CAPTURE
     )
-    session.task_capture_config = {'hz': 15}  # Task set up for recording: a policy session still records nothing.
+    # A capture profile is there: a policy session off Live both arms still records nothing.
     with pytest.raises(ValueError, match='replays an episode, runs a policy or follows the headset: one of them'):
         session.start(replay={'episode': 's/e'}, policy={'policy': 'hold_still'})
     session.start(policy={'policy': 'hold_still'})
@@ -178,7 +179,6 @@ def test_a_policy_session_carries_the_policy_and_on_the_robot_the_cameras_not_a_
     robot = TeleopSession(
         helm_stub(), TELEOP, runs=tmp_path, target='jetson', edge_factory=Robot, capture_profile=CAPTURE
     )
-    robot.task_capture_config = {'hz': 15}
     robot.start(policy={'policy': 'lerobot:/home/ltr/minerva/policies/act-001'})
     bundle, options = sent[-1]
     assert bundle['source'] == {'kind': 'policy', 'policy': 'lerobot:/home/ltr/minerva/policies/act-001'}
@@ -198,8 +198,8 @@ def test_a_policy_session_with_takeover_needs_the_leaders_and_records_on_both_li
         runs=tmp_path,
         core_factory=lambda bundle: Core(bundle),
         leaders=SimpleNamespace(saved=None, missing=lambda routes: ['J1']),
+        capture_profile=CAPTURE,
     )
-    session.task_capture_config = {'hz': 15}
     session.receiver = {'mode': 'live', 'arm': 'both'}
     with pytest.raises(ValueError, match='missing: J1'):  # The leaders must be ready to take over.
         session.start(confirm=True, policy={'policy': 'hold_still', 'takeover': True})
@@ -211,7 +211,8 @@ def test_a_policy_session_with_takeover_needs_the_leaders_and_records_on_both_li
         wait_until(lambda: session.snapshot()['phase'] == 'running')
         bundle = Core.made[-1].bundle
         assert bundle['source'] == {'kind': 'policy', 'policy': 'hold_still', 'takeover': True}
-        assert bundle['task_capture'] == {'hz': 15}  # Both live arms record a rollout, labelled by the capture.
+        # Both live arms record a rollout, labelled by the capture, with no setup step (the profile Helm started with).
+        assert bundle['task_capture'] == validate_config(json.loads(CAPTURE.read_text(encoding='utf-8')))
     finally:
         session.stop()
     session.receiver = {'mode': 'live', 'arm': 'left'}  # One arm records nothing.
