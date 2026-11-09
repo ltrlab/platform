@@ -94,13 +94,21 @@ def test_simulation_session_refuses_direct_physical_selection_and_start(helm, tm
         session.start(confirm=True)
 
 
-def test_task_setup_requires_both_arms_and_explicit_camera_profile(helm, tmp_path):
+def test_every_live_both_arms_session_on_the_robot_records_without_a_setup_step(helm, tmp_path):
+    """2026-11-08: a session started without Set up task could never record. On the robot each session on Live both
+    arms carries the capture profile Helm started with; otherwise the card says why it records nothing."""
     session = TeleopSession(helm, DEVICES / 'minerva-teleop.json', runs=tmp_path, target='jetson')
-    with pytest.raises(ValueError, match='both arms'):
+    with pytest.raises(ValueError, match='Nothing to set up on the robot'):
         session.task_action('setup')
+    assert 'both arms live' in session.recording_unavailable()
+    assert 'both arms live' in session._session_capture()['task_capture_unavailable']
     session.set_receiver('live', 'both')
-    with pytest.raises(ValueError, match='capture-profile'):
-        session.task_action('setup')
+    assert 'capture profile' in session.recording_unavailable()
+    session.capture_profile = DEVICES / 'minerva-task-capture.json'  # As Helm's --capture-profile.
+    assert session.recording_unavailable() is None
+    assert session._session_capture()['task_capture']['camera_roles'] == ['left_wrist', 'right_wrist', 'head']
+    session.capture_profile = tmp_path / 'missing.json'
+    assert 'cannot be used' in session._session_capture()['task_capture_unavailable']
     assert not session.active and not session.task_configured
 
 
@@ -214,21 +222,25 @@ def test_scene_progress_is_delivered_to_gui_without_changing_recorded_facts(helm
     asyncio.run(run())
 
 
-def test_control_recording_check_uses_small_health_and_reports_nested_writer_failure():
-    from robot_platform.helm.recording import RecordingError
-
-    state = {'recording': {'active': True, 'state': 'recording', 'error': None}}
+def test_control_recording_check_uses_small_health_and_ends_only_a_failed_episode():
+    state = {'recording': {'active': True, 'state': 'recording', 'error': None, 'episode': 1}}
 
     def forbidden():
         pytest.fail('Control loop requested full task/UI snapshot')
 
     core = TeleopCore.__new__(TeleopCore)
     core.task_capture = SimpleNamespace(health=lambda: state, snapshot=forbidden)
-    core._recording_error, core._recorder = None, None
+    core._recording_error, core._recorder, core._events = None, None, None
     core._check_recording()
-    state['recording'] = {'active': False, 'state': 'failed', 'error': 'scene closed before completion'}
-    with pytest.raises(RecordingError, match='scene closed'):
-        core._check_recording()
+    state['recording'] = {'active': False, 'state': 'failed', 'error': 'scene closed before completion', 'episode': 1}
+    core._check_recording()  # A failed episode is no session fault: the arms hold once (_episode_hold).
+    assert core._episode_hold and 'scene closed before completion' in core._episode_notice
+    core._episode_hold = False
+    core._check_recording()
+    assert not core._episode_hold  # Once per failed episode.
+    state.update(failed=True, error='capture worker exited')
+    core._check_recording()  # The capture stopped: nothing more records this session; following goes on.
+    assert core._capture_lost == 'capture worker exited' and core._episode_hold  # It was recording when it stopped.
 
 
 @pytest.mark.parametrize(

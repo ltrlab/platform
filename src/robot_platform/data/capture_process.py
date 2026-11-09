@@ -21,6 +21,9 @@ MAX_COMMANDS = 16
 STATUS_TIMEOUT_S = 0.75
 HEARTBEAT_S = 0.1
 STDERR_LIMIT = 64 * 1024
+# A recording's small health: `episode` (a live capture's count of episodes started) tells a failed episode's status
+# from the next one's, and `path` is its file (helm.teleop._check_capture writes both to the session's events).
+RECORDING_HEALTH = ('active', 'error', 'state', 'complete', 'episode', 'path', 'frames')
 
 
 def _write(stream, packet):
@@ -107,6 +110,7 @@ class ProcessCapture:
         self._closed = threading.Event()
         self._closing = False
         self._latest, self._sequence, self._commands = None, 0, []
+        self._end_reason = None  # An episode to end in the child (end_episode), sent before the next commands.
         self._source_changed_wall = None
         self._latest_stamp = None
         self._received = time.monotonic()
@@ -205,6 +209,15 @@ class ProcessCapture:
         """Latch failure and notify the child without waiting for any pipe or disk I/O."""
         self._fail(reason)
 
+    def end_episode(self, reason):
+        """End the child's episode now recording, never the capture, without waiting for any pipe or disk I/O. It
+        reaches the child before any command queued after it, so a new start_record records the next episode."""
+        with self._lock:
+            if self._closing or self._failure:
+                return
+            self._end_reason = self._end_reason or str(reason)
+        self._wake.set()
+
     def _send(self, config):
         sent, last_sent = -1, 0.0
         try:
@@ -215,6 +228,7 @@ class ProcessCapture:
                 with self._lock:
                     closing = self._closing
                     commands, self._commands = self._commands, []
+                    ending, self._end_reason = self._end_reason, None
                     sequence, sample = self._sequence, self._latest
                     now = time.monotonic()
                     stale = self._have_status and now - self._received > STATUS_TIMEOUT_S
@@ -227,8 +241,11 @@ class ProcessCapture:
                 if self._failure:
                     _write(self._process.stdin, {'abort': self._failure})
                     return
-                if commands or (sample is not None and sequence != sent):
-                    _write(self._process.stdin, {'sample': sample, 'commands': commands})
+                if commands or ending or (sample is not None and sequence != sent):
+                    packet = {'sample': sample, 'commands': commands}
+                    if ending:
+                        packet['end_episode'] = ending
+                    _write(self._process.stdin, packet)
                     sent, last_sent = sequence, time.monotonic()
                 elif time.monotonic() - last_sent >= HEARTBEAT_S:
                     _write(self._process.stdin, {'heartbeat': True})
@@ -289,7 +306,7 @@ class ProcessCapture:
                     and not failed
                     and not self._closing
                 ),
-                'recording': {key: recording.get(key) for key in ('active', 'error', 'state', 'complete')},
+                'recording': {key: recording.get(key) for key in RECORDING_HEALTH},
             }
 
     def snapshot(self):

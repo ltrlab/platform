@@ -16,10 +16,11 @@ import time
 from urllib.parse import urlparse
 
 from robot_platform.transport.wire import unpack_camera
-from robot_platform.data.capture_process import STATUS_TIMEOUT_S
+from robot_platform.data.capture_process import RECORDING_HEALTH, STATUS_TIMEOUT_S
 from robot_platform.data.roster import ARM_AXES, HEAD_AXES, HEAD_JOINTS
 
 CAMERAS = ('left_wrist', 'right_wrist', 'head')
+EPISODE_CLOSE_S = 5.0  # A failed episode's partial file closes within this, as a capture's teardown budget.
 
 
 def validate_config(value):
@@ -240,6 +241,21 @@ def recording_images(frames, size):
     return images, provenance
 
 
+def skew_error(candidates, bound):
+    """Why no coherent set exists, naming a camera whose newest frame fell behind the others' (stalling, or dropping
+    off USB: the left wrist 6 s into an episode on 2026-11-08 gave only the bound). `candidates`: each camera's fresh
+    frames, newest first."""
+    newest = {name: rows[0]['sampled_at'] for name, rows in candidates.items()}
+    behind = min(newest, key=newest.get)
+    lag = max(newest.values()) - newest[behind]
+    reason = 'camera publisher timestamp skew exceeds the capture profile'
+    if lag > bound:
+        return (
+            f"{reason}: {behind}'s newest frame is {lag * 1000:.0f} ms older than the others' (stalling, or off USB?)"
+        )
+    return f'{reason}: no frame from each camera within {bound * 1000:.0f} ms of the others'
+
+
 class CameraCache:
     """Bounded decoded camera history; duplicate publisher stamps never renew freshness."""
 
@@ -347,7 +363,7 @@ class CameraCache:
             }
             if all(chosen.values()):
                 return chosen
-        raise ValueError('camera publisher timestamp skew exceeds the capture profile')
+        raise ValueError(skew_error(candidates, self.config['max_camera_skew_s']))
 
     def status(self, now):
         result = {}
@@ -449,6 +465,8 @@ def paired_receiver_sample(result, rows, names, config, *, dropped=0, started_at
 
 
 class LiveTaskCapture:
+    _episode = 0  # Episodes started (set per capture in __init__; the default serves views built without it).
+
     def __init__(
         self,
         directory,
@@ -481,6 +499,7 @@ class LiveTaskCapture:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._request = 0
+        self._episode = 0  # Each recording's status names its own episode (recording['episode']).
         self._state = dict(
             available=False,
             capabilities={'source': 'real', 'contacts': 'unobserved', 'task_success': 'operator_review_required'},
@@ -513,10 +532,18 @@ class LiveTaskCapture:
         self._sample = sample
         writer = getattr(self, '_writer', None)
         if writer is not None and (sample.get('error') or not sample.get('command_valid')):
-            self.abort(sample.get('error') or 'Receiver no longer has active emitted command authority')
+            self.end_episode(sample.get('error') or 'Receiver no longer has active emitted command authority')
+
+    def end_episode(self, reason):
+        """End the episode now recording, never publishing it: its partial file keeps the first reason given. The
+        capture goes on and records the next episode once the receiver, cameras and head are ready again."""
+        with self._lock:
+            writer = self._writer
+        if writer is not None:
+            writer.abort(str(reason))  # Nonblocking; the capture thread then waits for its close (_end_episode).
 
     def abort(self, reason):
-        """Fence publication immediately, including while finish waits on disk, without joining."""
+        """End the capture: fence publication immediately, including while finish waits on disk, without joining."""
         with self._lock:
             self._abort_reason = self._abort_reason or str(reason)
             writer = self._writer
@@ -572,7 +599,7 @@ class LiveTaskCapture:
                     and age is not None
                     and 0 <= age <= self.config['max_receiver_age_s']
                 ),
-                recording={key: recording.get(key) for key in ('active', 'error', 'state', 'complete')},
+                recording={key: recording.get(key) for key in RECORDING_HEALTH},
             )
 
     def snapshot(self):
@@ -631,6 +658,9 @@ class LiveTaskCapture:
                             head.ingest(parts[-1], received_at=received, wall_time=wall)
                         else:
                             cache.ingest(name, parts, received_at=received, wall_time=wall, mapped_at=self.clock())
+                if writer is not None and writer.status().get('error'):
+                    # Ended from outside (end_episode: the receiver lost authority) or by its own writer thread.
+                    writer = self._end_episode(writer)
                 now, sample = self.clock(), self._sample
                 try:
                     request, action = self._commands.get_nowait()
@@ -668,6 +698,7 @@ class LiveTaskCapture:
                             )
                             with self._lock:
                                 self._writer = writer
+                                self._episode += 1
                                 cancelled = self._abort_reason
                             if cancelled:
                                 writer.abort(cancelled)
@@ -688,7 +719,7 @@ class LiveTaskCapture:
                                 with self._lock:
                                     self._finalizing = False
                             with self._lock:
-                                self._state['recording'] = writer.status()
+                                self._state['recording'] = dict(writer.status(), episode=self._episode)
                                 self._writer = None
                             writer = None
                     except Exception as exc:
@@ -714,22 +745,28 @@ class LiveTaskCapture:
                     # Waiting for that sample never extends a sample's freshness: none arriving within the
                     # receiver age bound of the open fails here like any stalled receiver.
                     opened_at = None
-                    self._ready(sample, now, require_commands=True)
-                    frames = cache.select(sample['source_time'])
-                    head_sample = head.select(sample['source_time'])
-                    sources = (sample['source_time'], *(frames[n]['publisher_time'] for n in self.camera_roles))
-                    # Wait for a new acquisition from every camera; never relabel a repeated frame as new. Until
-                    # one comes, look again on the next poll (10 ms at most, sooner when a camera publishes), not a
-                    # whole period later: the slowest camera (the head, ~15 fps) then paces a steady rate instead
-                    # of gaps of one and two periods (demo 1, 2026-10-21).
-                    if last_sources is None or all(a > b for a, b in zip(sources, last_sources)):
-                        self._append_frame(writer, sample, frames, head_sample)
-                        last_sources = sources
-                        # The next tick on a grid from the first frame, not a period after this admission: the few
-                        # milliseconds spent noticing each head frame never add up into a skipped one. A grid left
-                        # more than a period behind restarts from now.
-                        period = 1 / self.config['hz']
-                        next_frame = next_frame + period if now - next_frame < period else now + period
+                    try:
+                        self._ready(sample, now, require_commands=True)
+                        frames = cache.select(sample['source_time'])
+                        head_sample = head.select(sample['source_time'])
+                        sources = (sample['source_time'], *(frames[n]['publisher_time'] for n in self.camera_roles))
+                        # Wait for a new acquisition from every camera; never relabel a repeated frame as new. Until
+                        # one comes, look again on the next poll (10 ms at most, sooner when a camera publishes),
+                        # not a whole period later: the slowest camera (the head, ~15 fps) then paces a steady rate
+                        # instead of gaps of one and two periods (demo 1, 2026-10-21).
+                        if last_sources is None or all(a > b for a, b in zip(sources, last_sources)):
+                            self._append_frame(writer, sample, frames, head_sample)
+                            last_sources = sources
+                            # The next tick on a grid from the first frame, not a period after this admission: the
+                            # few milliseconds spent noticing each head frame never add up into a skipped one. A
+                            # grid left more than a period behind restarts from now.
+                            period = 1 / self.config['hz']
+                            next_frame = next_frame + period if now - next_frame < period else now + period
+                    except Exception as exc:
+                        # A stale or missing camera, head or receiver sample ends this episode (never filled in or
+                        # restamped), not the capture: a camera dropping off USB 6 s into an episode (2026-11-08)
+                        # kept every later episode from recording until the session was stopped.
+                        writer = self._end_episode(writer, exc)
                 with self._lock:
                     self._last_progress = self.clock()
                     self._state['available'] = True
@@ -766,16 +803,15 @@ class LiveTaskCapture:
                         else 'waiting for cameras'
                     }
                     if writer is not None:
-                        self._state['recording'] = writer.status()
-                        if self._state['recording'].get('error'):
-                            raise RuntimeError(self._state['recording']['error'])
+                        # A writer error ends the episode at the next pass (_end_episode), not the capture.
+                        self._state['recording'] = dict(writer.status(), episode=self._episode)
         except Exception as exc:
             if writer is not None:
                 writer.abort(str(exc))
             with self._lock:
                 self._state.update(error=str(exc), failed=True)
                 if writer is not None:
-                    self._state['recording'] = writer.status()
+                    self._state['recording'] = dict(writer.status(), episode=self._episode)
         finally:
             if writer is not None and writer.status().get('active'):
                 writer.abort('Session ended before explicit recording completion')
@@ -787,7 +823,25 @@ class LiveTaskCapture:
                 self._state['available'] = False
                 self._state['capture_ready'] = False
                 if writer is not None:
-                    self._state['recording'] = writer.status()
+                    self._state['recording'] = dict(writer.status(), episode=self._episode)
+
+    def _end_episode(self, writer, error=None):
+        """The capture thread's end of an episode that failed: abort its writer (its first reason stays), wait for its
+        partial file's close as close() would (bounded; the stall check waits with it, as during finish), then record
+        the next episode when asked. A writer that does not close in time fails the capture, close() waiting again."""
+        writer.abort(str(error) if error is not None else 'Episode ended')
+        with self._lock:
+            self._finalizing = True
+        try:
+            writer.wait_closed(timeout=EPISODE_CLOSE_S)
+        finally:
+            with self._lock:
+                self._finalizing = False
+                self._last_progress = self.clock()
+                self._state['recording'] = dict(writer.status(), episode=self._episode)
+        with self._lock:
+            self._writer = None
+        return None
 
     def _append_frame(self, writer, sample, frames, head):
         images, provenance = recording_images(frames, self.config['recording_image_size'])
@@ -797,6 +851,9 @@ class LiveTaskCapture:
         self._ready(sample, now, require_commands=True)
         if self._abort_reason:
             raise ValueError(self._abort_reason)
+        ended = writer.status().get('error')  # The episode ended meanwhile (end_episode: authority lost).
+        if ended:
+            raise ValueError(ended)
         for name, frame in frames.items():
             if not 0 <= now - frame['sampled_at'] <= self.config['max_camera_age_s']:
                 raise ValueError(f'{name}: camera frame expired during recording preprocessing')
@@ -858,5 +915,5 @@ class LiveTaskCapture:
         if writer is not None:
             writer.wait_closed(timeout=max(0.0, deadline - time.monotonic()))
             with self._lock:
-                self._state['recording'] = writer.status()
+                self._state['recording'] = dict(writer.status(), episode=self._episode)
                 self._writer = None

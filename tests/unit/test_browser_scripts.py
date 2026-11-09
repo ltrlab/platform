@@ -54,6 +54,13 @@ def test_capture_failure_locks_following_but_keeps_disable_shutdown_and_stop():
     assert result.returncode == 0, result.stderr.decode(errors='replace')[-1200:]
 
 
+def test_the_task_card_records_in_any_session_says_why_not_and_goes_on_after_a_failed_episode():
+    node = shutil.which('node')
+    assert node, 'Node.js is required to check the browser lifecycle'
+    result = subprocess.run([node, str(ROOT / 'tests/ui/test_helm_task_card.mjs')], capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')[-1200:]
+
+
 def test_live_camera_packets_bound_headers_pixels_and_freshness_metadata():
     node = shutil.which('node')
     assert node, 'Node.js is required to check the camera packet boundary'

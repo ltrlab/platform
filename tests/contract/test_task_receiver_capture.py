@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 from robot_platform.control.joint_calibration import load_plan
 from robot_platform.control.servo_calibration import load_servo
-from robot_platform.helm.recording import RecordingError
 from robot_platform.helm.teleop import TeleopCore
 from robot_platform.simulation.control_harness import default_binary
 from robot_platform.simulation.minerva_sim import SCENE
@@ -222,8 +221,12 @@ def test_receiver_rows_and_two_real_rendered_cameras_form_one_episode_and_worker
         while not view.health()['failed'] and time.monotonic() < deadline:
             time.sleep(0.01)
         assert view.health()['failed'] and not view.health()['capture_ready']
-        with pytest.raises(RecordingError):
-            core._check_recording()
+        # The capture stopping ends recording for this session, not the session (2026-11-08): the arms hold once
+        # for the episode it was recording, and Record is refused with the reason until the session restarts.
+        core._check_recording()
+        assert core._capture_lost and core._episode_hold
+        with pytest.raises(ValueError, match='Recording stopped in this session'):
+            core.task_action('start_record')
         assert len([p for p in (tmp_path / 'episodes').glob('*.hdf5') if '.partial.' not in p.name]) == 1
     finally:
         core.close()

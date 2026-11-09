@@ -277,6 +277,80 @@ def test_recording_failure_holds_until_operator_stop_and_preserves_cleanup(tmp_p
     receiver.transport.on_result(sample())  # Late callbacks cannot restart recording.
 
 
+class EpisodeCapture:
+    """A task capture's small health, as LiveTaskCaptureProcess.health reports it; one episode recording."""
+
+    def __init__(self):
+        self.failed, self.error, self.commands = False, None, []
+        self.recording = dict(active=True, state='recording', error=None, complete=False, episode=1)
+
+    def health(self):
+        recording = dict(self.recording)
+        return dict(
+            available=not self.failed, failed=self.failed, error=self.error, capture_ready=True, recording=recording
+        )
+
+    def snapshot(self):
+        return self.health()
+
+    def command(self, action):
+        self.commands.append(action)
+        return {'accepted': True, 'id': len(self.commands)}
+
+    def abort(self, reason):
+        pytest.fail(f'a failed episode aborted the whole capture: {reason}')
+
+
+@pytest.mark.parametrize('initial_state', ['HOLD', 'TELEOP'])
+def test_a_failed_episode_holds_once_then_engage_and_record_work_again(tmp_path, initial_state):
+    """Live, live-20261109T004323Z: the left wrist camera dropped off USB 6 s into an episode. Helm latched RECORDING
+    FAILED for the session: following, Engage and recording stayed locked until the session was stopped, and the
+    session's own event log stopped, so the failure was never written there. A failed episode now holds the arms
+    once, goes into the event log, and leaves the session as it was: Engage follows and Record starts the next one."""
+    instance = core(tmp_path)
+    receiver = SimpleNamespace(directory=tmp_path, transport=SimpleNamespace(on_result=None))
+    instance._start_recording(receiver, {'joints': [{'name': 'joint'}]})
+    order = []
+    session = instance.session = LifecycleReceiver(initial_state, receiver.transport.on_result, order)
+    capture = instance.task_capture = EpisodeCapture()
+    sequence = iter(range(10**6, 10**7))
+
+    def leader(engaged):  # A fresh leader sample each cycle, sampled just before it, where the arm is.
+        row = dict(name='joint', position=session.position, velocity=0.0, sampled_at=session.now + 0.009)
+        return [dict(row, sequence=next(sequence))], None
+
+    instance._leader_target = leader
+    try:
+        instance.tick(None, session.now + 0.01)
+        assert session.lifecycle.state == initial_state and instance.recording_fault is None
+        error = 'left_wrist: no fresh camera frame available at the observation cutoff'
+        capture.recording = dict(
+            active=False, state='failed', error=error, complete=False, episode=1, path='task_episode_1.partial.hdf5'
+        )
+        instance.tick(None, session.now + 0.01)
+        assert instance.recording_fault is None and instance.fault is None and instance.phase == 'running'
+        assert session.lifecycle.state == 'HOLD' and session.enabled
+        assert session.records[-1]['action'] == ('disengage' if initial_state == 'TELEOP' else None)
+        assert 'Episode failed' in instance.message and error in instance.message
+        for _ in range(3):  # Held once: the failed episode's status stays, and holds nothing more.
+            instance.tick(None, session.now + 0.01)
+            assert session.records[-1]['action'] is None
+        instance.tick('T', session.now + 0.01)
+        assert session.records[-1]['action'] == 'engage' and session.lifecycle.state in ('ENGAGING', 'TELEOP')
+        for _ in range(50):  # Aligned to the leader where the arm is: following.
+            if session.lifecycle.state == 'TELEOP':
+                break
+            instance.tick(None, session.now + 0.01)
+        assert session.lifecycle.state == 'TELEOP' and instance.recording_fault is None
+        instance.task_action('start_record')
+        assert capture.commands == ['start_record']
+    finally:
+        instance.close()  # Drains the session's event log.
+    events = [json.loads(line) for line in (tmp_path / 'events.jsonl').read_text().splitlines()]
+    failed = [event for event in events if event['kind'] == 'episode_failed']
+    assert len(failed) == 1 and failed[0]['error'] == error and failed[0]['file'] == 'task_episode_1.partial.hdf5'
+
+
 def test_drain_only_after_receiver_cleanup_even_when_disable_failed(tmp_path):
     instance = core(tmp_path)
     order = []

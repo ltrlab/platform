@@ -207,17 +207,66 @@ def test_receiver_command_validity_is_distinct_from_fresh_observation(state, ena
 
 
 def test_process_latches_short_authority_loss_before_latest_mailbox_replacement(monkeypatch):
+    """The loss ends the episode recording (never the capture: the next episode records once authority is back)."""
     child = LiveTaskCaptureProcess.__new__(LiveTaskCaptureProcess)
     child.names, child.config = NAMES, config()
     child._lock = threading.Lock()
     child._state = {'recording': {'active': False}, 'last_command': {'state': 'pending', 'action': 'start_record'}}
     child._record_requested = True
-    received, aborted = [], []
+    received, ended, aborted = [], [], []
     monkeypatch.setattr(child, 'submit', lambda *a, **k: received.append(a))
+    monkeypatch.setattr(child, 'end_episode', ended.append)
     monkeypatch.setattr(child, 'abort', aborted.append)
     response, rows = receiver('disarmed', False)
     child.receive(response, rows, started_at=10.0, received_at=10.004)
-    assert aborted and not received
+    assert ended and not aborted and received  # Ended, and the child still sees the receiver for the next one.
+
+
+def test_an_ended_episode_reaches_the_child_before_the_next_commands_and_the_worker_goes_on():
+    """end_episode: the parent's packet carries it ahead of any command queued after it; the child ends its episode
+    there and keeps running (only abort, close or EOF end the capture)."""
+    calls = []
+
+    class View:
+        def __init__(self, **config):
+            pass
+
+        def snapshot(self):
+            return dict(available=True, capture_ready=False, failed=False, error=None, recording={'active': False})
+
+        def end_episode(self, reason):
+            calls.append(('end_episode', reason))
+
+        def receive_sample(self, sample):
+            calls.append(('sample', sample))
+
+        def command(self, action, payload):
+            calls.append(('command', action))
+            return {'accepted': True, 'id': 1}
+
+        def abort(self, reason):
+            calls.append(('abort', reason))
+
+        def close(self):
+            calls.append(('close', None))
+
+    source = BytesIO()
+    for packet in (
+        {'config': {}},
+        {'sample': None, 'commands': [['a1', 'start_record', {}]], 'end_episode': 'Receiver lost authority'},
+        {'close': True},
+    ):
+        ipc._write(source, packet)
+    source.seek(0)
+    _worker(factory=View, input_stream=source, output_stream=BytesIO())
+    assert calls == [('end_episode', 'Receiver lost authority'), ('command', 'start_record'), ('close', None)]
+    source = BytesIO()
+    for packet in ({'config': {}}, {'sample': None, 'commands': [], 'end_episode': 7}):
+        ipc._write(source, packet)
+    source.seek(0)
+    calls.clear()
+    _worker(factory=View, input_stream=source, output_stream=BytesIO())
+    assert calls[0][0] == 'abort' and 'end reason must be text' in calls[0][1]
 
 
 def test_the_loop_labels_each_sample_with_who_drives_and_the_child_checks_the_label(monkeypatch):

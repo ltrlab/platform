@@ -1,8 +1,11 @@
 """Recording faults hold the actual fourteen-axis receiver; no USB/hardware.
 
-The deterministic simulation clock exercises authority/lifecycle, not physical
-object retention or workstation timing. Failure sources are injected at the
-capture/diagnostic boundary; the native receiver and ArmPlant are real.
+The session's own evidence failing (samples, events, latency: helm.recording) latches RECORDING FAILED: every axis held
+until the session stops. An episode failing, or its capture stopping, holds the arms once and leaves the session as it
+was (2026-11-08: a wrist camera dropped off USB mid-episode, and the latch then kept every later episode from
+recording). The deterministic simulation clock exercises authority/lifecycle, not physical object retention or
+workstation timing. Failure sources are injected at the capture/diagnostic boundary; the native receiver and ArmPlant
+are real.
 """
 
 import importlib.util
@@ -28,18 +31,22 @@ pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 class Capture:
     def __init__(self):
-        self.failure = None
+        self.failure = None  # The capture itself stopped (its worker exited, its status stalled).
+        self.episode_error = None  # One episode failed (a camera, the head or the receiver went stale); it goes on.
         self.aborted = []
         self.commands = []
         self.stage = 'recording'
 
     def health(self):
+        recording = {'active': self.stage == 'recording', 'state': 'failed' if self.failure else self.stage}
+        if self.episode_error:
+            recording = dict(active=False, state='failed', error=self.episode_error, episode=1, path='episode.hdf5')
         return {
             'failed': bool(self.failure),
             'error': self.failure,
             'available': True,
             'capture_ready': not self.failure,
-            'recording': {'active': self.stage == 'recording', 'state': 'failed' if self.failure else self.stage},
+            'recording': recording,
             'last_command': {'action': self.stage, 'state': 'pending'},
         }
 
@@ -129,7 +136,7 @@ def rig(tmp_path, request):
 
 @pytest.mark.parametrize('state', ['HOLD', 'ENGAGING', 'TELEOP'])
 @pytest.mark.parametrize('stage', ['recording', 'start_record', 'stop_record'])
-def test_failed_capture_holds_all_axes_renews_authority_and_locks_reengagement(rig, state, stage):
+def test_failed_evidence_holds_all_axes_renews_authority_and_locks_reengagement(rig, state, stage):
     core = rig.core
     if state == 'TELEOP':
         rig.engage()
@@ -138,13 +145,13 @@ def test_failed_capture_holds_all_axes_renews_authority_and_locks_reengagement(r
         assert core.session.lifecycle.state == 'ENGAGING'
     capture = core.task_capture = Capture()
     capture.stage = stage
-    capture.failure = 'camera stale / capture worker failed'
+    failure = core._recording_error = 'disk queue overflow'
     core._tuning_pending = {'must_not_apply': True}
     rig.tick('T')  # A queued Engage cannot win a pre-cycle failure.
-    assert core.recording_fault == capture.failure and core.fault is None
+    assert core.recording_fault == failure and core.fault is None
     assert core.session.lifecycle.state == 'HOLD' and core.phase == 'running'
     assert core._tuning_pending is None and core._tuning_result[0]
-    assert capture.aborted == [capture.failure]
+    assert capture.aborted == [failure]
     held = tuple(core.session.lifecycle.target)
     before = core.harness.last['status']['now_ms']
     sequence = rig.leaders.sequence
@@ -192,12 +199,16 @@ def test_post_cycle_diagnostic_error_holds_next_cycle_without_closing_writer(rig
     assert core._recorder is not None  # Cleanup/draining has not run in a powered tick.
 
 
+@pytest.mark.parametrize('kind', ['evidence', 'episode'])
 @pytest.mark.parametrize('ending_request', ['H', 'X', 'stop'])
-def test_capture_failure_does_not_override_an_operator_shutdown(rig, ending_request):
+def test_capture_failure_does_not_override_an_operator_shutdown(rig, ending_request, kind):
     rig.engage()
     core = rig.core
     capture = core.task_capture = Capture()
-    capture.failure = 'disk full'
+    if kind == 'evidence':
+        core._recording_error = 'disk full'
+    else:
+        capture.episode_error = 'left_wrist: no fresh camera frame available at the observation cutoff'
     core.set_zero()  # Previously queued zero-hold must not replace H, X, or Stop.
     assert core._hold
     if ending_request == 'stop':
@@ -213,10 +224,10 @@ def test_real_receiver_fault_is_not_masked_by_recording_failure(rig):
     rig.engage()
     core = rig.core
     core.task_capture = Capture()
-    core.task_capture.failure = 'camera stale'
+    core._recording_error = 'disk full'
     rig.clock.now += 0.2  # Actual native command validity/lease expires.
     rig.tick()
-    assert core.recording_fault == 'camera stale'
+    assert core.recording_fault == 'disk full'
     assert core.fault and core.session.lifecycle.state == 'FAULT'
     assert 'Receiver' in core.message or 'FAULT' in core.message
     rig.tick('H')
@@ -227,7 +238,7 @@ def test_unconfirmed_guarded_hold_uses_existing_hard_receiver_stop(rig, monkeypa
     rig.engage()
     core = rig.core
     core.task_capture = Capture()
-    core.task_capture.failure = 'disk full'
+    core._recording_error = 'disk full'
     original = core.session.cycle
 
     def skipped(**kwargs):
@@ -253,7 +264,7 @@ def test_real_run_loop_retains_failed_capture_hold_until_operator_or_parent_clos
 
     def tick(key, started):
         if len(ticks) == 3:
-            capture.failure = 'camera worker exited'
+            core._recording_error = 'disk full'
         original(key, started)
         ticks.append((core.session.lifecycle.state, core.harness.last['hardware_enabled'], core.recording_fault))
         assert len(ticks) < 2000, 'run_loop did not finish shutdown'
@@ -305,19 +316,27 @@ def test_real_run_loop_retains_failed_capture_hold_until_operator_or_parent_clos
     assert not core.harness.last['hardware_enabled']
     if ending != 'H':
         assert any(state == 'SHUTDOWN' for state, _, _ in ticks)
-    assert capture.aborted == ['camera worker exited']
+    assert capture.aborted == ['disk full']
 
 
+@pytest.mark.parametrize('kind', ['evidence', 'episode', 'capture'])
 @pytest.mark.parametrize('state', ['DISABLED', 'IDLE'])
-def test_failure_while_disabled_or_idle_cannot_enable_or_request_position_hold(rig, state):
+def test_failure_while_disabled_or_idle_cannot_enable_or_request_position_hold(rig, state, kind):
     core = rig.core
     rig.tick('H')
     if state == 'IDLE':
         rig.tick('I')
     enabled = core.harness.last['hardware_enabled']  # IDLE keeps the existing damping-only authority.
     core.task_capture = Capture()
-    core.task_capture.failure = 'camera failed at startup'
-    for key in ('E', 'T', 'I'):
+    if kind == 'evidence':
+        core._recording_error = 'disk full'
+    elif kind == 'episode':
+        core.task_capture.episode_error = 'right_wrist: no fresh camera frame available at the observation cutoff'
+    else:
+        core.task_capture.failure = 'camera failed at startup'
+    # The latch refuses every key; an episode's failure (or its capture's) only the one queued with it, after which
+    # keys are the operator's again: the failure alone never enables or holds.
+    for key in ('E', 'T', 'I') if kind == 'evidence' else ('E', None, None):
         rig.tick(key)
         assert core.session.lifecycle.state == state and core.fault is None
         assert core.harness.last['hardware_enabled'] == enabled
@@ -325,7 +344,7 @@ def test_failure_while_disabled_or_idle_cannot_enable_or_request_position_hold(r
 
 
 @pytest.mark.parametrize('rig', ['minerva-teleop.json'], indirect=True)
-def test_capture_fault_retains_native_motion_collision_checks_in_hold(rig, monkeypatch):
+def test_evidence_fault_retains_native_motion_collision_checks_in_hold(rig, monkeypatch):
     # The actual native collision compiler remains in every guarded HOLD cycle.
     rig.engage()
     core = rig.core
@@ -340,7 +359,7 @@ def test_capture_fault_retains_native_motion_collision_checks_in_hold(rig, monke
 
     monkeypatch.setattr(core.compiler, 'compile', compile_checked)
     core.task_capture = Capture()
-    core.task_capture.failure = 'capture worker died'
+    core._recording_error = 'disk full'
     rig.tick('T')
     held = tuple(core.session.lifecycle.target)
     for _ in range(12):
@@ -351,3 +370,53 @@ def test_capture_fault_retains_native_motion_collision_checks_in_hold(rig, monke
     assert core.compiler.last_verdict['clear']
     rig.until('DISABLED', 'X')
     assert not core.harness.last['hardware_enabled']
+
+
+@pytest.mark.parametrize('kind', ['episode', 'capture'])
+def test_a_failed_episode_holds_all_axes_once_then_engage_follows_again(rig, kind):
+    """Live, live-20261109T004323Z: the left wrist camera dropped off USB 6 s into an episode; the latch then held the
+    arms until the session stopped. Now a failed episode, or its capture stopping, holds every axis once with torque on
+    and the receiver's authority renewed, and is no session fault: Engage (T) follows again. After a failed episode,
+    Record starts the next one; after the capture stopped, recording waits for a new session."""
+    rig.engage()
+    core = rig.core
+    capture = core.task_capture = Capture()
+    if kind == 'episode':
+        capture.episode_error = 'left_wrist: no fresh camera frame available at the observation cutoff'
+    else:
+        capture.failure = 'capture worker exited'
+    before = core.harness.last['status']['now_ms']
+    rig.tick()
+    assert core.recording_fault is None and core.fault is None and core.phase == 'running'
+    assert core.session.lifecycle.state == 'HOLD' and core.harness.last['hardware_enabled'] is True
+    assert len(core.session.lifecycle.names) == 14
+    assert ('Episode failed' if kind == 'episode' else 'Recording stopped') in core.message
+    held = tuple(core.session.lifecycle.target)
+    for _ in range(80):
+        rig.tick()
+        assert core.fault is None and core.session.lifecycle.state == 'HOLD'
+        assert core.harness.last['hardware_enabled'] is True and tuple(core.session.lifecycle.target) == held
+    assert core.harness.last['status']['now_ms'] - before > 150
+    rig.engage()
+    assert core.session.lifecycle.state == 'TELEOP' and core.recording_fault is None
+    assert capture.aborted == []  # Ending an episode never ends the capture.
+    if kind == 'episode':
+        core.task_action('start_record')
+        assert capture.commands == ['start_record']
+    else:
+        with pytest.raises(ValueError, match='Recording stopped in this session'):
+            core.task_action('start_record')
+    rig.until('DISABLED', 'X')
+    assert not core.harness.last['hardware_enabled']
+
+
+def test_an_engage_pressed_as_an_episode_fails_waits_for_the_next_press(rig):
+    core = rig.core  # Holding (the rig enables to HOLD) while an episode records.
+    capture = core.task_capture = Capture()
+    capture.episode_error = 'head: no fresh head pose at the observation cutoff'
+    rig.tick('T')
+    assert core.session.lifecycle.state == 'HOLD' and 'Episode failed' in core.message
+    rig.tick()
+    assert core.session.lifecycle.state == 'HOLD'
+    rig.engage()
+    assert core.session.lifecycle.state == 'TELEOP' and core.fault is None

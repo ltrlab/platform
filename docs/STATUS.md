@@ -1,6 +1,6 @@
 # Status
 
-What has run on a real robot, what has only passed offline tests, and what is open. Updated 2026-11-06. The dated
+What has run on a real robot, what has only passed offline tests, and what is open. Updated 2026-11-08. The dated
 records behind this page are in [`history/`](history/) and [`devices/`](devices/).
 
 ## Minerva
@@ -47,10 +47,17 @@ These pass the offline gate and are not in the running release.
 - The lift over USB serial (`firmware/lift_actuator`), tested only in its simulator. `lift` stays inactive in the
   robot's definition and has no receiver.
 - The simulation line: scripted demonstrator, generated episodes, randomized layouts, table fiducials.
+- Recording in any session on Live and Both, with no setup step. A failed episode ends only itself: its partial file is
+  kept with its reason, the arms hold once and the next episode records in the same session. A skew failure names the
+  camera that fell behind ([task workflow](operator/HELM_TASK_WORKFLOW.md)).
 
 ### Open
 
 - **Format 9's first live check.** Learning from real data depends on it.
+- **The wrist cameras drop off USB.** Four drops on 2026-11-08 across both wrists, before and after a reboot and after
+  the head's servo adapter moved to another hub port; one ended an episode 6 s in with a timestamp-skew failure. The cause
+  (cable, hub or interference) is not found. The selected frames' skew has a thin margin even without a drop: p99 19.8 ms
+  against the 20 ms bound.
 - **A policy trained on all of format 9's axes cannot drive the robot.** Policy mode runs the 14 arm axes and refuses a
   policy with other joints. It fails closed. The exporter cuts a format 9 episode to the arms by name
   (`--joints left,right`) and policy mode takes such a policy's joints by name, but neither has run on real format 9

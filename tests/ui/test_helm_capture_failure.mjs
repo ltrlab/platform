@@ -9,6 +9,7 @@ import {
   sessionInput,
   sessionMode,
 } from '../../src/robot_platform/helm/static/teleop_mode.js';
+import { taskView } from '../../src/robot_platform/helm/static/task_view.js';
 
 const source = await fs.readFile(new URL('../../src/robot_platform/helm/static/helm.js', import.meta.url), 'utf8');
 const section = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
@@ -29,6 +30,7 @@ const $ = (id) => {
 const lifecycle = ['I', 'E', 'T', 'H', 'X', undefined].map((key) => ({ dataset: { key }, disabled: false }));
 const context = {
   $,
+  taskView,
   ENGAGED: ['ENGAGING', 'TELEOP'],
   CONTROL_LAWS: {},
   teleopPhase: 'running',

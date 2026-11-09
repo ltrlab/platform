@@ -1,7 +1,9 @@
-# Task setup and recording: both arms, cube handoff and bucket
+# Task recording: both arms, cube handoff and bucket
 
-Helm's task card sets up a task and records episodes in a teleop session. It never creates another motor publisher and never
-enables the robot. The same card runs against the simulator (`helm --sim`, for rehearsal; see
+Helm's task card records episodes in a teleop session. It never creates another motor publisher and never enables the robot.
+On the robot there is no setup step: every session on **Live** and **Both** can record. The card says why **Record episode**
+cannot act when it cannot (which camera it waits for, the head pose, the arms neither holding nor following), and a failed
+episode ends only itself: its partial file is kept with its reason and Record starts the next one in the same session. The same card runs against the simulator (`helm --sim`, for rehearsal; see
 [Simulate](../getting-started/SIMULATE.md)) and against the robot.
 
 **Status.** The running release records episode format 8 (14 axes, no torque); one real demonstration had been recorded at the
@@ -16,8 +18,8 @@ reduce rendering cost); `cad` selects full CAD visuals. This changes appearance,
 process refuses physical connection, calibration, tuning, receiver and Jetson-target actions. The leaders' USB is opened only by
 an explicit leader connection or session start; close other programs that own their serial ports first.
 
-1. Open **Teleop**, then **Set up task** before starting the session. It selects the cube, table and bucket contact scene; it
-   opens no USB.
+1. Open **Teleop**, then **Set up task** before starting the session (the simulator only: the button is hidden on the robot).
+   It selects the cube, table and bucket contact scene; it opens no USB.
 2. Check the saved leader identities, ranges and robot mappings in **Leaders**.
 3. **Start session**. A MuJoCo window shows both arms, the cube, the table and the bucket. **Reset simulated scene** is
    available only in disabled or Idle states and never during a recording; it does not move the arms.
@@ -38,8 +40,10 @@ receives bounded scalar snapshots from the teleop receiver and owns the camera s
 RGB images stay on the Jetson and do not pass through the control loop's IPC or Helm's status RPC.
 
 Prepare as for any live session ([Safety](SAFETY.md), [Check](HELM_MANUAL.md#check)): attended, foot switch in reach, a clear
-path. Choose **Live** and **Both** (a one-arm receiver cannot configure this capture), then **Set up task**. Do not run the
-legacy collector beside Helm; Helm owns the receiver.
+path. Choose **Live** and **Both** and start the session; there is nothing to set up first. Before a session the task card says
+whether a session started now would record, and if not, why: a one-arm or virtual receiver, or Helm started without
+`--capture-profile`. A session of the head alone, a replay and a headset session record nothing, and the card says so. Do not
+run the legacy collector beside Helm; Helm owns the receiver.
 
 The capture requires **left_wrist, right_wrist and head**, the 16 named axes and the head pose feed. All must be fresh before
 recording, and Helm never fills a missing view:
@@ -57,7 +61,9 @@ saved head alignment when there is one, else the CAD mount. Stored images' intri
 
 `recording_image_size: [320, 240]` downsamples each 640 x 480 RGB frame by an integer factor with `Image.reduce(2)` (recorded as
 `operation: integer_reduce` with the Pillow version, shapes and RGB order); live previews keep 640 x 480. The profile requests
-**15 Hz** (the head publishes about 15 fps and every recorded frame needs a new acquisition from every camera). Admission bounds:
+**15 Hz** (the head publishes about 15 fps and every recorded frame needs a new acquisition from every camera). The wrist
+cameras deliver about 50 fps whatever their configuration asks (measured 2026-11-08); the capture keeps each camera's newest
+8 frames and records the newest set inside the bounds below. Admission bounds:
 receiver age at most 30 ms, camera age at most 200 ms, inter-camera publisher timestamp skew at most 20 ms. These are capture
 admission limits, not measured synchronization guarantees; publisher stamps are host read-complete times, not exposure times.
 Check the recorded rate and timing.
@@ -67,7 +73,7 @@ Check the recorded rate and timing.
    backwards, stale, future, wrong-identity and malformed data.
 3. Verify the saved limits and both arms' feedback before Idle, Enable, Engage. **Record episode** (or pedal **A**) becomes
    available only with a paired receiver sample, active command authority in Holding or Executing, and all cameras fresh at the
-   conservative cutoff.
+   conservative cutoff. Until then the card says what it waits for; the button's tooltip says the same.
 4. Perform the task and finish the episode explicitly (A again, or **Stop recording**). Judge success by review; the collector
    does not infer contact or success.
 5. Confirm the file reads, all 16 axes, the effort and head-pose masks, the three RGB streams, timestamps, action validity and
@@ -87,12 +93,29 @@ failure; parent loss cancels pending publication. Stop recording and wait for co
 During teardown the owner uses one bounded 5-second budget; if it times out the child exits with failure and the partial file is
 never published as complete. Each process keeps a `capture-worker-*.stderr.log` beside the episodes.
 
-A recording or diagnostics failure latches **RECORDING FAILED** for the session, requests the episode abort and stops following
-the leaders: a healthy receiver moves to its guarded HOLD with torque on. It does not return or disable the arms for a camera or
-disk failure. Enable, engage, route and zero edits, tuning and new recordings stay locked until the session is stopped and
-restarted. H still disables immediately; X and Stop session request the controlled return, so make sure that path is clear of
-the table, the object and obstacles. Entering this HOLD captures the measured positions of every axis, including both grippers,
-and may remove a grip squeeze: **object retention is not qualified**.
+**A failed episode ends only itself.** Any of those failures during an episode (most often a wrist camera that stalls or drops
+off USB) closes that episode's partial file with its reason, and Helm:
+
+- writes `episode_failed` with the reason, the file and its frame count to the session's `events.jsonl`;
+- stops following once: the arms move to their guarded HOLD with torque on, as when a camera drops off USB. **Engage (T)**
+  follows again. An Enable or Engage pressed in the same instant as the failure is dropped: press it again. H and X still act;
+- shows `Episode failed: <reason>. Its partial file is kept` on the task card. **Record episode** starts the next episode in the
+  same session once every camera is fresh again.
+
+A timestamp-skew failure names the camera that fell behind, for example `left_wrist's newest frame is 41 ms older than the
+others' (stalling, or off USB?)`. A failed episode that does not close within 5 seconds stops the capture, as below.
+
+**If the capture itself stops** (its worker process exits or stops answering), Helm writes `capture_failed`, holds the arms once
+if an episode was recording, and the card says `Recording stopped: <reason>`. Nothing more records in that session: stop it and
+start another. Following, Engage and the rest of the session are not locked.
+
+**RECORDING FAILED** is for the session's own evidence log (`samples.f32`, `events.jsonl`): if it fails, Helm latches the
+failure for the session, requests the episode abort and stops following the leaders: a healthy receiver moves to its guarded HOLD
+with torque on. It does not return or disable the arms. Enable, engage, route and zero edits, tuning and new recordings stay
+locked until the session is stopped and restarted. H still disables immediately; X and Stop session request the controlled
+return, so make sure that path is clear of the table, the object and obstacles. Entering this HOLD captures the measured
+positions of every axis, including both grippers, and may remove a grip squeeze. **Object retention is not qualified** through
+any of these holds.
 
 The raw capture ([EPISODE_FORMAT.md](../data/EPISODE_FORMAT.md)) declares the camera roles and joint names; paired measured and
 emitted commanded motor coordinates; measured effort and velocity; the head's neck angles and camera pose; RGB images; source,

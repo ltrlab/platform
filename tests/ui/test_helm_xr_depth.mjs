@@ -143,7 +143,10 @@ camera.start();
 assert.equal(new URL(sockets[0].address).searchParams.get('roles'), 'head_depth');
 sockets[0].open();
 sockets[0].onmessage({ data: depthPacket(7) });
-for (let turn = 0; turn < 200 && !frames.length; turn++) await new Promise((resolve) => setImmediate(resolve));
+// The depth inflates on Node's thread pool (DecompressionStream), so it lands after real time, not after a count of turns:
+// a count of 200 turns ran out on a loaded runner (CI, 2026-11-09) and in 3 of 48 runs 12 at a time here. Wait up to 5 s.
+for (const end = Date.now() + 5000; !frames.length && Date.now() < end;)
+  await new Promise((resolve) => setImmediate(resolve));
 assert.equal(frames.length, 1, camera.message);
 assert.equal(frames[0].bitmap, 'bitmap');
 // Filled here, as where the browser has no worker: the readings, each its own source, and the one hole filled.
